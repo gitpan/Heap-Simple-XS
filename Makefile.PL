@@ -8,7 +8,7 @@ WriteMakefile
      VERSION_FROM	=> 'XS.pm', # finds $VERSION
      PERL_MALLOC_OK	=> 1,
      'PREREQ_PM'	=> {
-         "Heap::Simple"	=> 0.07,	# implementor switch
+         "Heap::Simple"	=> 0.08,	# implementor switch
          "Test::More"	=> 0.11,	# For the tests only
      },
      AUTHOR	=> 'Ton Hospel <Heap::Simple::XS@ton.iguana.be>',

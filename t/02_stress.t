@@ -331,6 +331,9 @@ is($fake->top_key, 55);
 is_deeply($fake->extract_top, [11]);
 is_deeply($fake->extract_top, [100]);
 
+# Check proper cleanup of already added stuff on a croak
+eval { $class->new(infinity => Canary->new(5), order => "waf") };
+
 $fake = undef;
 $code = undef;
 $val  = undef;

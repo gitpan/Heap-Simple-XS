@@ -564,9 +564,8 @@ new(char *class, ...)
     h->max_count = -1;
     h->dirty = 0;
     h->locked = 0;
-    RETVAL = NEWSV(__LINE__, 0);
+    RETVAL = sv_newmortal();
     sv_setref_pv(RETVAL, class, (void*) h);
-    sv_2mortal(SvREFCNT_inc(RETVAL));
     for (i=1; i<items; i++) {
         STRLEN len;
         /* SvPV does magic fetch */
@@ -801,6 +800,7 @@ new(char *class, ...)
     /* Can't happen, but let's just make sure */
     if (h->wrapped && !h->has_values) 
         croak("Assertion: wrapped but no has_values");
+    SvREFCNT_inc(RETVAL);
   OUTPUT:
     RETVAL
 

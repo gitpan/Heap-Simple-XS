@@ -4,7 +4,7 @@ use strict;
 use warnings;
 use Carp;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 require XSLoader;
 XSLoader::load('Heap::Simple::XS', $VERSION);
@@ -36,7 +36,7 @@ Heap::Simple::XS - An XS implementation of the Heap::Simple interface
 
 =head1 DESCRIPTION
 
-This module provides a pure perl implementation of the interface described
+This module provides an XS implementation of the interface described
 in L<Heap::Simple|Heap::Simple>. Look there for a description.
 
 =head1 NOTES
@@ -54,9 +54,20 @@ The dirty option will cause scalars for the C<E<lt>> and C<E<gt>> orders
 to be stored internally as an NV (double or long double). This means you lose
 magic, overload and any internal integer representation.
 
-The C<E<lt>> and C<E<gt>> order will also cause C<Array> and C<Hash> elements
-to get their key internally cached as a NV. So indirect changes to the value
+The C<E<lt>> and C<E<gt>> order will cause C<Array> and C<Hash> elements
+to get their key internally cached as an NV. So indirect changes to the value
 won't be noticed anymore (but most of the time you shouldn't do that anyways).
+It also means these will start behaving like a wrapped heap type, so they
+return true for L<wrapped|Heap::Simple/wrapped> and support 
+L<key_insert|Heap::Simple/key_insert> and 
+L<key_absorb|Heap::Simple/key_absorb>.
+
+The C<E<lt>> and C<E<gt>> order will cause C<Object> and C<Any> elements
+to store the key as an NV (these two already were wrapped heap types).
+
+It has no effect on C<Method> and C<Function> element types since it's 
+assumed you B<want> the key recalculations for these for some reason (if you 
+didn't, you would have asked for C<Object> or C<Any> elements).
 
 =item
 

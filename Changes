@@ -1,6 +1,15 @@
 Revision history for Perl extension Heap::Simple::XS.
 
-0.01  2004-10-23
+Plan:
+	- dirty strings
+
+0.02  2004-10-26
+	- Document that dirty Array and Hash types for numeric orders will
+          be effectively wrapped.
+	- Document the use of dirty NV keys for types Any and Object.
+        - Didn't properly free stuff already allocated if new croaks (bugfix)
+
+0.01  2004-10-25
         - First Releasable version.
 
 0.00  2004-10-12

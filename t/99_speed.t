@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl t/s.t'
+# `make test'. After `make install' it should work as `perl t/99_speed.t'
 
 BEGIN { $^W = 1 };
 use strict;
@@ -12,6 +12,7 @@ use Test::More tests => 2;
 my $cachegrind  = 0;
 my $simple_only = 0;
 my $dirty       = 0;
+my $calibrate	= 5;
 
 # Don't use insanely much memory even on very fast computers
 my $max_size = 1e6;
@@ -66,11 +67,8 @@ my $do_array = !$simple_only && !$cachegrind && eval '
     use Array::Heap2;
     1';
 
-my $i;
-
 print STDERR "\n";
 my $size;
-my $calibrate = 5;
 if ($cachegrind) {
     @run = ("valgrind", "--tool=cachegrind", $^X);
     $size = 10000;
@@ -79,6 +77,7 @@ if ($cachegrind) {
     # Calibrate perl speed
     mark();
     print STDERR "Calibrating. Should take about $calibrate seconds\n";
+    my $i = 0;
     my $from;
     if (!$hires) {
         $from = time;
