@@ -18,6 +18,9 @@ is(Heap::Simple->implementation, "Heap::Simple::XS");
 
 # Same very basic checks
 my $heap = Heap::Simple->new;
+isa_ok($heap, "Heap::Simple", "We get the type we asked for");
+isa_ok($heap, Heap::Simple->implementation, 
+       "And it's also of the expected implementor type");
 is($heap->count, 0);
 my $val = 5;
 $heap->insert($val);

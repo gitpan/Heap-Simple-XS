@@ -36,7 +36,7 @@ typedef struct heap {
     SV *user_data;	/* Associated data, only for the user */
     UV used;		/* How many values/keys are used+1 (index 0 unused) */
     UV allocated;	/* How many values/keys are allocated */
-    UV max_count;	/* Maximum heap size, 0 means unlimited */
+    UV max_count;	/* Maximum heap size, (UV) -1 means unlimited */
     I32 aindex;		/* A value used for indexing the key for a value */
     int wrapped;	/* True if keys are stored seperate from values */
     int fast;		/* True means that keys are scalars, not SV's */
@@ -540,6 +540,204 @@ static SV *extract_top(pTHX_ heap h) {
     return t1;
 }
 
+void option(heap h, SV *tag, SV *value) {
+    STRLEN len;
+    /* SvPV does magic fetch */
+    char *name = SvPV(tag, len);
+    if (len >= 5) switch(name[0]) {
+      case 'c':
+        if (len == 7 && strEQ(name, "can_die")) {
+            /* SvTRUE does mg_get (through sv_2bool) */
+            h->can_die = SvTRUE(value);
+            return;
+        }
+        break;
+      case 'd':
+        if (len == 5 && strEQ(name, "dirty")) {
+            if (h->dirty) croak("Multiple dirty options");
+            /* SvTRUE does mg_get (through sv_2bool) */
+            h->dirty = SvTRUE(value) ? 1 : -1;
+            return;
+        }
+        break;
+      case 'e':
+        if (len == 8 && strEQ(name, "elements")) {
+            if (h->elements) croak("Multiple elements options");
+            if (MAGIC) SvGETMAGIC(value);
+            if (SvROK(value)) {
+                /* Some sort of reference */
+                AV *av;
+                SV **fetched;
+
+                av = (AV*) SvRV(value);
+                if (SvTYPE(av) != SVt_PVAV)
+                    croak("option elements is not an array reference");
+                fetched = av_fetch(av, 0, 0);
+                /* SvPV will do get magic */
+                if (fetched) name = SvPV(*fetched, len);
+                if (!fetched || !SvOK(*fetched))
+                    croak("option elements has no type defined at index 0");
+                if (len == 6 && low_eq(name, "scalar") ||
+                    len == 3 && low_eq(name, "key")) {
+                    if (av_len(av) > 0)
+                        warn("Extra arguments to Scalar ignored");
+                    h->elements = SCALAR;
+                } else if (len == 5 && low_eq(name, "array")) {
+                    h->elements = ARRAY;
+                    if (av_len(av) > 0) {
+                        SV **pindex, *index;
+                        IV i;
+                        if (av_len(av) > 1) warn("Extra arguments to Array ignored");
+                        pindex = av_fetch(av, 1, 0);
+                        /* SvIV will do get magic (through sv_2iv) */
+                        index = pindex ? *pindex : &PL_sv_undef;
+                        h->aindex = i = SvIV(index);
+                        if (i != h->aindex)
+                            croak("Index overflow of %"IVdf, i);
+                    } else h->aindex = 0;
+                } else if (len == 4 && low_eq(name, "hash")) {
+                    SV **index;
+                    h->elements = HASH;
+                    if (av_len(av) < 1)
+                        croak("missing key name for %"SVf, *fetched);
+                    if (av_len(av) > 1)
+                        warn("Extra arguments to Hash ignored");
+                    index = av_fetch(av, 1, 0);
+                    if (h->hkey)
+                        croak("Assertion: already have a hash key");
+                    /* newSVsv will do get magic */
+                    if (index) h->hkey = newSVsv(*index);
+                    if (!index || !SvOK(*index))
+                        croak("missing key name for %"SVf, *fetched);
+                    h->aindex = 0;
+                } else if (len == 6 && (low_eq(name, "method") ||
+                                        low_eq(name, "object"))) {
+                    SV **index;
+                    if (toLOWER(name[0]) == 'm') {
+                        h->elements = METHOD;
+                        if (av_len(av) < 1)
+                            croak("missing key method for %"SVf, *fetched);
+                    } else {
+                        h->elements = OBJECT;
+                        h->wrapped  = 1;
+                        if (av_len(av) < 1) return;
+                    }
+                    if (av_len(av) > 1)
+                        warn("Extra arguments to %"SVf" ignored", *fetched);
+                    index = av_fetch(av, 1, 0);
+                    if (h->hkey)
+                        croak("Assertion: already have a method name");
+                    /* newSVsv will do get magic */
+                    if (index) h->hkey = newSVsv(*index);
+                    if (!index || !SvOK(*index))
+                        croak("missing key method for %"SVf, *fetched);
+                } else if (len == 8 && low_eq(name, "function") ||
+                           len == 3 && low_eq(name, "any")) {
+                    SV **index;
+                    if (toLOWER(name[0]) == 'f') {
+                        h->elements = FUNCTION;
+                        if (av_len(av) < 1)
+                            croak("missing key function for %"SVf, *fetched);
+                    } else {
+                        h->elements = ANY_ELEM;
+                        h->wrapped  = 1;
+                        if (av_len(av) < 1) return;
+                    }
+                    if (av_len(av) > 1)
+                        warn("Extra arguments to %"SVf" ignored", *fetched);
+                    index = av_fetch(av, 1, 0);
+                    if (h->hkey)
+                        croak("Assertion: already have a key function");
+                    /* Don't check if it's actually a code ref.
+                       Allow unstrict name based call, or garbage that
+                       never gets used */
+                    /* newSVsv will do get magic */
+                    if (index) h->hkey = newSVsv(*index);
+                    if (!index || !SvOK(*index))
+                        croak("missing key function for %"SVf, *fetched);
+                } else
+                    croak("Unknown element type '%"SVf"'", *fetched);
+            } else {
+                name = SvPV(value, len);
+                if      (len == 6 && low_eq(name, "scalar") ||
+                         len == 3 && low_eq(name, "key"))
+                    h->elements = SCALAR;
+                else if (len == 5 && low_eq(name, "array")) {
+                    h->elements = ARRAY;
+                    h->aindex = 0;
+                } else if (len == 6 && low_eq(name, "object")) {
+                    h->elements = OBJECT;
+                    h->wrapped  = 1;
+                } else if (len == 3 && low_eq(name, "any")) {
+                    h->elements = ANY_ELEM;
+                    h->wrapped  = 1;
+                } else if (len == 4 && low_eq(name, "hash"))
+                    croak("missing key name for %"SVf, value);
+                else if(len == 6 && low_eq(name, "method"))
+                    croak("missing key method for %"SVf, value);
+                else if (len == 8 && low_eq(name, "function"))
+                    croak("missing key function for %"SVf, value);
+                else croak("Unknown element type '%"SVf"'", value);
+            }
+            return;
+        }
+        break;
+      case 'i':
+        if (len == 8 && strEQ(name, "infinity")) {
+            if (h->infinity) croak("Multiple infinity options");
+            h->infinity = newSVsv(value);
+            return;
+        }
+        break;
+      case 'm':
+        if (len == 9 && strEQ(name, "max_count")) {
+            NV max_count;
+            UV m;
+            if (h->max_count != (UV) -1) croak("Multiple max_count options");
+            max_count = SvNV(value);
+            if (max_count < 0) croak("max_count should not be negative");
+            if (max_count == NV_MAX*NV_MAX) return;
+            if (max_count >= (UV) -1) 
+                croak("max_count too big. Use infinity instead");
+            m = max_count;
+            if (m != max_count) croak("max_count should be an integer");
+            h->max_count = m;
+            return;
+        }
+        break;
+      case 'o':
+        if (len == 5 && strEQ(name, "order")) {
+            if (h->order) croak("Multiple order options");
+            /* SvPV does get magic */
+            name = SvPV(value, len);
+            if (SvROK(value)) {
+                /* Some sort of reference */
+                SV *cv = SvRV(value);
+                if (SvTYPE(cv) != SVt_PVCV)
+                    croak("order value is a reference but not a code reference");
+                h->order = CODE_ORDER;
+                h->order_sv = newRV_inc(cv);
+                return;
+            }
+            if      (len == 1 && name[0] == '<') h->order = LESS;
+            else if (len == 1 && name[0] == '>') h->order = MORE;
+            else if (len == 2 && low_eq(name, "lt")) h->order = LT;
+            else if (len == 2 && low_eq(name, "gt")) h->order = GT;
+            else croak("Unknown order '%"SVf"'", value);
+            return;
+        }
+        break;
+      case 'u':
+        if (len == 9 && strEQ(name, "user_data")) {
+            if (h->user_data) croak("Multiple user_data options");
+            h->user_data = newSVsv(value);
+            return;
+        }
+        break;
+    }
+    croak("Unknown option '%"SVf"'", tag);
+}
+
 MODULE = Heap::Simple::XS		PACKAGE = Heap::Simple::XS
 PROTOTYPES: ENABLE
 
@@ -566,215 +764,9 @@ new(char *class, ...)
     h->locked = 0;
     RETVAL = sv_newmortal();
     sv_setref_pv(RETVAL, class, (void*) h);
-    for (i=1; i<items; i++) {
-        STRLEN len;
-        /* SvPV does magic fetch */
-        char *name = SvPV(ST(i), len);
-        if (len < 5) croak("Unknown option '%"SVf"'", ST(i));
-        switch(name[0]) {
-          case 'c':
-            if (len == 7 && strEQ(name, "can_die")) {
-                i++;
-                /* SvTRUE does mg_get (through sv_2bool) */
-                h->can_die = SvTRUE(ST(i));
-                break;
-            }
-            croak("Unknown option %"SVf, ST(i));
-          case 'd':
-            if (len == 5 && strEQ(name, "dirty")) {
-                i++;
-                if (h->dirty) croak("Multiple dirty options");
-                /* SvTRUE does mg_get (through sv_2bool) */
-                h->dirty = SvTRUE(ST(i)) ? 1 : -1;
-                break;
-            }
-            croak("Unknown option %"SVf, ST(i));
-          case 'e':
-            if (len == 8 && strEQ(name, "elements")) {
-                if (h->elements) croak("Multiple elements options");
-                i++;
-                if (MAGIC) SvGETMAGIC(ST(i));
-                if (SvROK(ST(i))) {
-                    /* Some sort of reference */
-                    AV *av;
-                    SV **fetched;
 
-                    av = (AV*) SvRV(ST(i));
-                    if (SvTYPE(av) != SVt_PVAV)
-                        croak("option elements is not an array reference");
-                    fetched = av_fetch(av, 0, 0);
-                    /* SvPV will do get magic */
-                    if (fetched) name = SvPV(*fetched, len);
-                    if (!fetched || !SvOK(*fetched))
-                        croak("option elements has no type defined at index 0");
-                    if (len == 6 && low_eq(name, "scalar") ||
-                        len == 3 && low_eq(name, "key")) {
-                        if (av_len(av) > 0)
-                            warn("Extra arguments to Scalar ignored");
-                        h->elements = SCALAR;
-                    } else if (len == 5 && low_eq(name, "array")) {
-                        h->elements = ARRAY;
-                        if (av_len(av) > 0) {
-                            SV **pindex, *index;
-                            IV i;
-                            if (av_len(av) > 1) warn("Extra arguments to Array ignored");
-                            pindex = av_fetch(av, 1, 0);
-                            /* SvIV will do get magic (through sv_2iv) */
-                            index = pindex ? *pindex : &PL_sv_undef;
-                            h->aindex = i = SvIV(index);
-                            if (i != h->aindex)
-                                croak("Index overflow of %"IVdf, i);
-                        } else h->aindex = 0;
-                    } else if (len == 4 && low_eq(name, "hash")) {
-                        SV **index;
-                        h->elements = HASH;
-                        if (av_len(av) < 1)
-                            croak("missing key name for %"SVf, *fetched);
-                        if (av_len(av) > 1)
-                            warn("Extra arguments to Hash ignored");
-                        index = av_fetch(av, 1, 0);
-                        if (h->hkey)
-                            croak("Assertion: already have a hash key");
-                        /* newSVsv will do get magic */
-                        if (index) h->hkey = newSVsv(*index);
-                        if (!index || !SvOK(*index))
-                            croak("missing key name for %"SVf, *fetched);
-                        h->aindex = 0;
-                    } else if (len == 6 && (low_eq(name, "method") ||
-                                            low_eq(name, "object"))) {
-                        SV **index;
-                        if (toLOWER(name[0]) == 'm') {
-                            h->elements = METHOD;
-                            if (av_len(av) < 1)
-                                croak("missing key method for %"SVf, *fetched);
-                        } else {
-                            h->elements = OBJECT;
-                            h->wrapped  = 1;
-                            if (av_len(av) < 1) break;
-                        }
-                        if (av_len(av) > 1)
-                            warn("Extra arguments to %"SVf" ignored", *fetched);
-                        index = av_fetch(av, 1, 0);
-                        if (h->hkey)
-                            croak("Assertion: already have a method name");
-                        /* newSVsv will do get magic */
-                        if (index) h->hkey = newSVsv(*index);
-                        if (!index || !SvOK(*index))
-                            croak("missing key method for %"SVf, *fetched);
-                    } else if (len == 8 && low_eq(name, "function") ||
-                               len == 3 && low_eq(name, "any")) {
-                        SV **index;
-                        if (toLOWER(name[0]) == 'f') {
-                            h->elements = FUNCTION;
-                            if (av_len(av) < 1)
-                                croak("missing key function for %"SVf, *fetched);
-                        } else {
-                            h->elements = ANY_ELEM;
-                            h->wrapped  = 1;
-                            if (av_len(av) < 1) break;
-                        }
-                        if (av_len(av) > 1)
-                            warn("Extra arguments to %"SVf" ignored", *fetched);
-                        index = av_fetch(av, 1, 0);
-                        if (h->hkey)
-                            croak("Assertion: already have a key function");
-                        /* Don't check if it's actually a code ref.
-                           Allow unstrict name based call, or garbage that
-                           never gets used */
-                        /* newSVsv will do get magic */
-                        if (index) h->hkey = newSVsv(*index);
-                        if (!index || !SvOK(*index))
-                            croak("missing key function for %"SVf, *fetched);
-                    } else
-                        croak("Unknown element type '%"SVf"'", *fetched);
-                } else {
-                    name = SvPV(ST(i), len);
-                    if      (len == 6 && low_eq(name, "scalar") ||
-                             len == 3 && low_eq(name, "key"))
-                        h->elements = SCALAR;
-                    else if (len == 5 && low_eq(name, "array")) {
-                        h->elements = ARRAY;
-                        h->aindex = 0;
-                    } else if (len == 6 && low_eq(name, "object")) {
-                        h->elements = OBJECT;
-                        h->wrapped  = 1;
-                    } else if (len == 3 && low_eq(name, "any")) {
-                        h->elements = ANY_ELEM;
-                        h->wrapped  = 1;
-                    } else if (len == 4 && low_eq(name, "hash"))
-                      croak("missing key name for %"SVf, ST(i));
-                    else if(len == 6 && low_eq(name, "method"))
-                      croak("missing key method for %"SVf, ST(i));
-                    else if (len == 8 && low_eq(name, "function"))
-                        croak("missing key function for %"SVf, ST(i));
-                    else croak("Unknown element type '%"SVf"'", ST(i));
-                }
-                break;
-            }
-            croak("Unknown option %"SVf, ST(i));
-          case 'i':
-            if (len == 8 && strEQ(name, "infinity")) {
-                if (h->infinity) croak("Multiple infinity options");
-                i++;
-                h->infinity = newSVsv(ST(i));
-                break;
-            }
-            croak("Unknown option %"SVf, ST(i));
-          case 'm':
-            if (len == 9 && strEQ(name, "max_count")) {
-                NV max_count;
-                UV m;
-                if (h->max_count != (UV) -1) 
-                    croak("Multiple max_count options");
-                i++;
-                max_count = SvNV(ST(i));
-                if (max_count < 0) 
-                    croak("max_count should not be negative");
-                if (max_count == NV_MAX*NV_MAX) break;
-                if (max_count >= (UV) -1)
-                    croak("max_count too big. Use infinity instead");
-                m = max_count;
-                if (m != max_count) 
-                    croak("max_count should be an integer");
-                h->max_count = m;
-                break;
-            }
-            croak("Unknown option %"SVf, ST(i));
-          case 'o':
-            if (len == 5 && strEQ(name, "order")) {
-                if (h->order) croak("Multiple order options");
-                i++;
-                /* SvPV does get magic */
-                name = SvPV(ST(i), len);
-                if (SvROK(ST(i))) {
-                    /* Some sort of reference */
-                    SV *cv = SvRV(ST(i));
-                    if (SvTYPE(cv) != SVt_PVCV)
-                        croak("order value is a reference but not a code reference");
-                    h->order = CODE_ORDER;
-                    h->order_sv = newRV_inc(cv);
-                    break;
-                }
-                if      (len == 1 && name[0] == '<') h->order = LESS;
-                else if (len == 1 && name[0] == '>') h->order = MORE;
-                else if (len == 2 && low_eq(name, "lt")) h->order = LT;
-                else if (len == 2 && low_eq(name, "gt")) h->order = GT;
-                else croak("Unknown order '%"SVf"'", ST(i));
-                break;
-            }
-            croak("Unknown option %"SVf, ST(i));
-          case 'u':
-            if (len == 9 && strEQ(name, "user_data")) {
-                if (h->user_data) croak("Multiple user_data options");
-                i++;
-                h->user_data = newSVsv(ST(i));
-                break;
-            }
-            croak("Unknown option %"SVf, ST(i));
-          default:
-            croak("Unknown option %"SVf, ST(i));
-        }
-    }
+    for (i=1; i<items; i+=2) option(h, ST(i), ST(i+1));
+
     if (!h->order) h->order    = LESS;
     if (!h->infinity) switch(h->order) {
       case LESS: h->infinity = newSVnv( NV_MAX*NV_MAX); break;
@@ -788,9 +780,6 @@ new(char *class, ...)
     if (!h->elements) h->elements = SCALAR;
     if (h->dirty < 0) h->dirty = 0;
 
-    /*
-       if (h->dirty && (h->order == LESS || h->order == MORE) && 
-       (h->elements == SCALAR || h->wrapped)) h->fast = 1; */
     if (h->dirty && (h->order == LESS || h->order == MORE) && 
         (h->elements != FUNCTION && h->elements != METHOD)) h->fast = 1;
     if (h->fast && h->order != LESS && h->order != MORE)
@@ -1064,7 +1053,7 @@ _absorb(SV * heap1, SV *heap2)
                 sv_setnv(value, -FKEY(NV, h1, h1->used-1));
             else croak("No fast %s order", order_name(h1));
 
-            key_insert(h2, NULL, value);
+            key_insert(aTHX_ h2, NULL, value);
 
             h1->used--;
             if (h1->has_values) SvREFCNT_dec(value);
@@ -1168,7 +1157,7 @@ _key_absorb(SV * heap1, SV *heap2)
                 sv_setnv(key, -FKEY(NV, h1, h1->used-1));
             else croak("No fast %s order", order_name(h1));
 
-            key_insert(h2, key, value);
+            key_insert(aTHX_ h2, key, value);
 
             h1->used--;
             if (h1->has_values) SvREFCNT_dec(value);
@@ -1385,6 +1374,7 @@ DESTROY(heap h)
     SV *key, *value;
   PPCODE:
     if (h->locked) warn("lock during DESTROY. Something is *deeply* wrong");
+    h->locked = 1;
     if (h->fast || !h->wrapped) {
         if (h->has_values)
             while (h->used > 1) SvREFCNT_dec(h->values[--h->used]);

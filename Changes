@@ -2,6 +2,13 @@ Revision history for Perl extension Heap::Simple::XS.
 
 Plan:
 	- dirty strings
+        - add tests for self-locking
+
+0.03  2004-11-05
+	- self-lock during DESTROY too
+        - Added a few forgotten aTHX_ arguments to key_insert (reported by 
+          Mike Castle, thanks).
+        - dropped useless load of Carp in XS.pm
 
 0.02  2004-10-26
 	- Document that dirty Array and Hash types for numeric orders will

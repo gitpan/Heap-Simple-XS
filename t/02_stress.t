@@ -9,7 +9,6 @@ BEGIN { $^W = 1 };
 use Test::More "no_plan";
 use lib "t";
 use FakeHeap;
-use Ties;
 
 BEGIN {
     @Heap::Simple::implementors = qw(Heap::Simple::XS) unless
