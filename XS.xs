@@ -113,6 +113,8 @@ static const char *elements_name(heap h) {
       case 0: croak("Element type is unspecified");
     }
     croak("Assertion: Impossible element type %d", h->elements);
+    /* NOTREACHED */
+    return NULL;
 }
 
 static const char *order_name(heap h) {
@@ -125,6 +127,8 @@ static const char *order_name(heap h) {
       case 0: croak("Order type is unspecified");
     }
     croak("Assertion: Impossible order type %d", h->elements);
+    /* NOTREACHED */
+    return NULL;
 }
 
 /*  KEY only gets called if h->fast == 0 */
@@ -212,6 +216,8 @@ static SV *fetch_key(heap h, SV *value) {
     }
     croak("fetch_key does not return for element type '%s'",
           elements_name(h));
+    /* NOTREACHED */
+    return NULL;
 }
 
 /* should be able to handle get magic if needed, 
@@ -228,16 +234,20 @@ static int less(pTHX_ heap h, SV *l, SV *r) {
     PUTBACK;
     switch(h->order) {
       case LESS:
-        pp_lt();
+        /* pp_lt(); */
+        (void)*(PL_ppaddr[OP_LT])(aTHX);
         break;
       case MORE:
-        pp_gt();
+        /* pp_gt(); */
+        (void)*(PL_ppaddr[OP_GT])(aTHX);
         break;
       case LT:
-        pp_slt();
+        /* pp_slt(); */
+        (void)*(PL_ppaddr[OP_SLT])(aTHX);
         break;
       case GT:
-        pp_sgt();
+        /* pp_sgt(); */
+        (void)*(PL_ppaddr[OP_SGT])(aTHX);
         break;
       case CODE_ORDER:
         count = call_sv(h->order_sv, G_SCALAR);
@@ -707,7 +717,7 @@ void option(heap h, SV *tag, SV *value) {
             if (max_count == INFINITY) return;
             if (max_count >= (UV) -1) 
                 croak("max_count too big. Use infinity instead");
-            m = max_count;
+            m = (UV) max_count;
             if (m != max_count) croak("max_count should be an integer");
             h->max_count = m;
             return;
@@ -753,7 +763,7 @@ SV *
 new(char *class, ...)
   PREINIT:
     heap h;
-    UV i;
+    I32 i;
   CODE:
     if (items % 2 == 0) croak("Odd number of elements in options");
     New(__LINE__, h, 1, struct heap);
@@ -1073,7 +1083,6 @@ _absorb(SV * heap1, SV *heap2)
     else if (!sv_isobject(heap2)) croak("heap2 is not an object reference");
     else {
         I32 count;
-        int wrapped;
 
         ENTER;
         /* Simple way to keep the refcount up at both levels */
@@ -1177,7 +1186,6 @@ _key_absorb(SV * heap1, SV *heap2)
     else if (!sv_isobject(heap2)) croak("heap2 is not an object reference");
     else {
         I32 count;
-        int wrapped;
 
         ENTER;
         /* We will push up to three arguments */

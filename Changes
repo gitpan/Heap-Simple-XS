@@ -4,6 +4,12 @@ Plan:
 	- dirty strings
         - add tests for self-locking
 
+0.05  2004-11-07
+	- Removed a few unused variables.
+        - Add a few returns at unreachable places after croak to shut up 
+          compilers that think not all control paths return a value.
+	- Call pp_xxx through the ppaddr table so we don't need to link them.
+
 0.04  2004-11-06
 	- A few declaration were in the middle of code which is an error
           on strict C compilers.
