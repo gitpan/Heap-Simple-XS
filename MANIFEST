@@ -1,0 +1,23 @@
+Changes
+MANIFEST
+Makefile.PL
+README
+XS.pm
+XS.xs
+ppport.h
+t/01_basic.t
+t/02_stress.t
+t/03_magic.t
+t/04_overload.t
+t/99_speed.t
+t/FakeHeap.pm
+t/Ties.pm
+t/speed_array
+t/speed_binary
+t/speed_binomial
+t/speed_fibonacci
+t/speed_hash
+t/speed_priority
+t/speed_scalar
+typemap
+META.yml                                 Module meta-data (added by MakeMaker)
