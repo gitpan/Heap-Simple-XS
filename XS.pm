@@ -1,9 +1,8 @@
 package Heap::Simple::XS;
-use 5.006001;
 use strict;
-use warnings;
+# use warnings;
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
 require XSLoader;
 XSLoader::load('Heap::Simple::XS', $VERSION);

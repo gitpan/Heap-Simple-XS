@@ -1,3 +1,4 @@
+#!/usr/bin/perl -w
 use 5.006001;
 use ExtUtils::MakeMaker;
 BEGIN {

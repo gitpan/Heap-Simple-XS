@@ -5,6 +5,7 @@ README
 XS.pm
 XS.xs
 ppport.h
+t/00_load.t
 t/01_basic.t
 t/02_stress.t
 t/03_magic.t

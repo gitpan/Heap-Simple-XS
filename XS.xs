@@ -4,7 +4,15 @@
 
 #include "ppport.h"
 
-#define MAGIC	1
+#define MAGIC	1	/* Support magic */
+
+#ifndef INFINITY
+# ifdef HUGE_VAL
+#  define INFINITY	((NV) HUGE_VAL)
+# else /* HUGE_VAL */
+#  define INFINITY	(NV_MAX*NV_MAX)
+# endif /* HUGE_VAL */
+#endif /* INFINITY */
 
 enum order {
     LESS = 1,
@@ -273,12 +281,12 @@ static void key_insert(pTHX_ heap h, SV *key, SV *value) {
         else croak("No fast %s order", order_name(h));
 
         if (h->used > h->max_count) {
+            NV key1, key2;
             if (h->used < 2 || k <= FKEY(NV, h, 1)) return;
             /* Drop the old top and percolate the new value down */
             /* This is almost completely identical to extract_top, but
                I don't see a clean way to factor it out that preserves
                resistance agains crashes of less/fetch_key */
-            NV key1, key2;
             n = h->used-1;
             l = 2;
             
@@ -376,12 +384,12 @@ static void key_insert(pTHX_ heap h, SV *key, SV *value) {
     } else key_copied = 0;
 
     if (h->used > h->max_count) {
+        SV *key1, *key2;
         if (!less(aTHX_ h, KEY(h, 1), key)) return;
         /* Drop the old top and percolate the new value down */
         /* This is almost completely identical to extract_top, but
            I don't see a clean way to factor it out that preserves
            resistance agains exceptions in less/fetch_key */
-        SV *key1, *key2;
 
         n = h->used-1;
         l = 2;
@@ -696,7 +704,7 @@ void option(heap h, SV *tag, SV *value) {
             if (h->max_count != (UV) -1) croak("Multiple max_count options");
             max_count = SvNV(value);
             if (max_count < 0) croak("max_count should not be negative");
-            if (max_count == NV_MAX*NV_MAX) return;
+            if (max_count == INFINITY) return;
             if (max_count >= (UV) -1) 
                 croak("max_count too big. Use infinity instead");
             m = max_count;
@@ -769,8 +777,8 @@ new(char *class, ...)
 
     if (!h->order) h->order    = LESS;
     if (!h->infinity) switch(h->order) {
-      case LESS: h->infinity = newSVnv( NV_MAX*NV_MAX); break;
-      case MORE: h->infinity = newSVnv(-NV_MAX*NV_MAX); break;
+      case LESS: h->infinity = newSVnv( INFINITY); break;
+      case MORE: h->infinity = newSVnv(-INFINITY); break;
       case GT:   h->infinity = newSVpvn("", 0);         break;
       case LT: case CODE_ORDER: break;
       default:
@@ -1365,7 +1373,7 @@ can_die(heap h)
 void
 max_count(heap h)
   PPCODE:
-    if (h->max_count == (UV) -1) XSRETURN_NV(NV_MAX*NV_MAX);
+    if (h->max_count == (UV) -1) XSRETURN_NV(INFINITY);
     XSRETURN_UV(h->max_count);
 
 void
