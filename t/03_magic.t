@@ -160,7 +160,7 @@ $fun->(@array);
 is(Atie->fetches, 3);
 is(Htie->fetches, 0);
 
-tie @elements, "Atie", [8, \%hash];
+tie @elements, "Atie", 8, \%hash;
 tie @array, "Atie", $heap, \@elements;
 $fun = $heap->can("_key_insert") || 
     die "_key_insert is not implemented for $heap";

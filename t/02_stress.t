@@ -9,7 +9,6 @@ BEGIN { $^W = 1 };
 use Test::More "no_plan";
 use lib "t";
 use FakeHeap;
-use Ties;
 
 BEGIN {
     @Heap::Simple::implementors = qw(Heap::Simple::XS) unless
@@ -982,7 +981,8 @@ sub check_errors {
                                can_die => 1,
                                dirty => $dirty);
         my $j = 0;
-        eval { $heap->insert(Canary->new(-$j)), $j++ while $j < 15 };
+        # The strange 0-$j is for perl5.6.1 which otherwise passes -0
+        eval { $heap->insert(Canary->new(0-$j)), $j++, while $j < 15 };
         is($heap->count, $j);
         my @v = map $_->[0], $heap->values;
         ok(heapy(@v), "Is a heap: @v");
@@ -1003,7 +1003,8 @@ sub check_errors {
                                can_die => 1,
                                dirty => $dirty);
         my $j = 0;
-        eval { $heap->insert(Canary->new(-$j)), $j++ while $j < 15 };
+        # The strange 0-$j is for perl5.6.1 which otherwise passes -0
+        eval { $heap->insert(Canary->new(0-$j)), $j++ while $j < 15 };
         $n = 0;
         is($heap->count, $j);
         my @v = map $_->[0], $heap->values;
@@ -1026,10 +1027,12 @@ sub check_errors {
                                can_die => 1,
                                dirty => $dirty);
         my $j = 0;
-        eval { $heap->key_insert(Canary->new(-$j), Canary->new($j)), $j++ while
-                   $j < 15 };
+        # The strange 0-$j is for perl5.6.1 which otherwise passes -0
+        eval { $heap->key_insert(Canary->new(0-$j), 
+                                 Canary->new($j)), $j++ while $j < 15 };
         is($heap->count, $j);
-        my @v = map -$_->[0], $heap->values;
+        # The strange 0- is for perl5.6.1 which otherwise passes -0
+        my @v = map 0-$_->[0], $heap->values;
         ok(heapy(@v), "Is a heap: @v");
         is_deeply([map $_->[0], $heap->keys], \@v);
         is_deeply([sort {$a <=> $b } @v], [1-$j..0]);
@@ -1051,12 +1054,14 @@ sub check_errors {
         eval {
             while ($j < 15) {
                 Canary->inc;
-                $heap->_key_insert(bless [Canary->new(-$j), Canary->new($j)], "Canary");
+                # The strange 0-$j is for perl5.6.1 which otherwise passes -0
+                $heap->_key_insert(bless [Canary->new(0-$j), Canary->new($j)], "Canary");
                 $j++;
             }
         };
         is($heap->count, $j);
-        my @v = map -$_->[0], $heap->values;
+        # The strange 0-$j is for perl5.6.1 which otherwise passes -0
+        my @v = map 0-$_->[0], $heap->values;
         ok(heapy(@v), "Is a heap: @v");
         is_deeply([map $_->[0], $heap->keys], \@v);
         is_deeply([sort {$a <=> $b } @v], [1-$j..0]);
