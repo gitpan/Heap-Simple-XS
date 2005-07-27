@@ -2,7 +2,7 @@ package Heap::Simple::XS;
 use strict;
 # use warnings;
 
-our $VERSION = "0.06";
+our $VERSION = "0.07";
 
 require XSLoader;
 XSLoader::load('Heap::Simple::XS', $VERSION);
@@ -85,7 +85,7 @@ L<Heap::Simple::Perl>
 
 =head1 AUTHOR
 
-Ton Hospel, E<lt>Heap::Simple::XS@ton.iguana.beE<gt>
+Ton Hospel, E<lt>Heap-Simple-XS@ton.iguana.beE<gt>
 
 Parts are inspired by code by Joseph N. Hall
 L<http://www.perlfaq.com/faqs/id/196>

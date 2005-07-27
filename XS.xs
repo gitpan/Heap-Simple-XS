@@ -1,3 +1,4 @@
+#define PERL_NO_GET_CONTEXT	/* we want efficiency */
 #include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
@@ -13,6 +14,8 @@
 #  define INFINITY	(NV_MAX*NV_MAX)
 # endif /* HUGE_VAL */
 #endif /* INFINITY */
+
+#define MORTALCOPY(sv) sv_2mortal(newSVsv(sv))
 
 enum order {
     LESS = 1,
@@ -78,6 +81,145 @@ typedef struct heap {
       looks "wrapped" to the outside world for the last 3 cases
  */
 
+/* Duplicate from perl source (since it's not exported unfortunately) */
+static bool my_isa_lookup(pTHX_ HV *stash, const char *name, HV* name_stash,
+                          int len, int level) {
+    AV* av;
+    GV* gv;
+    GV** gvp;
+    HV* hv = Nullhv;
+    SV* subgen = Nullsv;
+
+    /* A stash/class can go by many names (ie. User == main::User), so
+       we compare the stash itself just in case */
+    if ((name_stash && stash == name_stash) ||
+        strEQ(HvNAME(stash), name) ||
+        strEQ(name, "UNIVERSAL")) return TRUE;
+
+    if (level > 100) croak("Recursive inheritance detected in package '%s'",
+                           HvNAME(stash));
+
+    gvp = (GV**)hv_fetch(stash, "::ISA::CACHE::", 14, FALSE);
+
+    if (gvp && (gv = *gvp) != (GV*)&PL_sv_undef && (subgen = GvSV(gv)) &&
+        (hv = GvHV(gv))) {
+        if (SvIV(subgen) == (IV)PL_sub_generation) {
+            SV* sv;
+            SV** svp = (SV**)hv_fetch(hv, name, len, FALSE);
+            if (svp && (sv = *svp) != (SV*)&PL_sv_undef) {
+                DEBUG_o( Perl_deb(aTHX_ "Using cached ISA %s for package %s\n",
+                                  name, HvNAME(stash)) );
+                return sv == &PL_sv_yes;
+            }
+        } else {
+            DEBUG_o( Perl_deb(aTHX_ "ISA Cache in package %s is stale\n",
+                              HvNAME(stash)) );
+            hv_clear(hv);
+            sv_setiv(subgen, PL_sub_generation);
+        }
+    }
+
+    gvp = (GV**)hv_fetch(stash,"ISA",3,FALSE);
+
+    if (gvp && (gv = *gvp) != (GV*)&PL_sv_undef && (av = GvAV(gv))) {
+	if (!hv || !subgen) {
+	    gvp = (GV**)hv_fetch(stash, "::ISA::CACHE::", 14, TRUE);
+
+	    gv = *gvp;
+
+	    if (SvTYPE(gv) != SVt_PVGV)
+		gv_init(gv, stash, "::ISA::CACHE::", 14, TRUE);
+
+	    if (!hv)
+		hv = GvHVn(gv);
+	    if (!subgen) {
+		subgen = newSViv(PL_sub_generation);
+		GvSV(gv) = subgen;
+	    }
+	}
+	if (hv) {
+	    SV** svp = AvARRAY(av);
+	    /* NOTE: No support for tied ISA */
+	    I32 items = AvFILLp(av) + 1;
+	    while (items--) {
+		SV* sv = *svp++;
+		HV* basestash = gv_stashsv(sv, FALSE);
+		if (!basestash) {
+		    if (ckWARN(WARN_MISC))
+			Perl_warner(aTHX_ packWARN(WARN_SYNTAX),
+                                    "Can't locate package %"SVf" for @%s::ISA",
+                                    sv, HvNAME(stash));
+		    continue;
+		}
+		if (my_isa_lookup(aTHX_ basestash, name, name_stash,
+                                  len, level + 1)) {
+		    (void)hv_store(hv,name,len,&PL_sv_yes,0);
+		    return TRUE;
+		}
+	    }
+	    (void)hv_store(hv,name,len,&PL_sv_no,0);
+	}
+    }
+    return FALSE;
+}
+
+#define C_HEAP(object, context) c_heap(aTHX_ object, context)
+
+static heap c_heap(pTHX_ SV *object, const char *context) {
+    SV *sv;
+    const char *type;
+    HV *stash, *class_stash;
+    IV address;
+
+    SvGETMAGIC(object);
+    if (!SvROK(object)) {
+        if (SvOK(object)) croak("%s is not a reference", context);
+        croak("%s is undefined", context);
+    }
+    sv = SvRV(object);
+    type = sv_reftype(sv,0);
+    if (!type || !strEQ(type, "Heap::Simple::XS")) {
+        if (!SvOBJECT(sv)) croak("%s is not an object reference", context);
+        stash = SvSTASH(sv);
+        /* Is the next even possible ? */
+        if (!stash) croak("%s is not a typed reference", context);
+        class_stash = gv_stashpv("Heap::Simple::XS", FALSE);
+        if (!my_isa_lookup(aTHX_ stash, "Heap::Simple::XS", class_stash, 16,0))
+            croak("%s is not a Heap::Simple::XS reference", context);
+    }
+    address = SvIV(sv);
+    if (!address) 
+        croak("Heap::Simple::XS object %s has a NULL pointer", context);
+    return INT2PTR(heap, address);
+}
+
+#define TRY_C_HEAP(object) try_c_heap(aTHX_ &(object))
+
+static heap try_c_heap(pTHX_ SV **object) {
+    SV *sv;
+    const char *type;
+    HV *stash, *class_stash;
+    IV address;
+
+    sv = *object;
+    if (!SvROK(sv)) return NULL;
+    sv = SvRV(sv);
+    type = sv_reftype(sv,0);
+    if (!type || !strEQ(type, "Heap::Simple::XS")) {
+        if (!SvOBJECT(sv)) return NULL;
+        stash = SvSTASH(sv);
+        /* Is the next even possible ? */
+        if (!stash) return NULL;
+        class_stash = gv_stashpv("Heap::Simple::XS", FALSE);
+        if (!my_isa_lookup(aTHX_ stash, "Heap::Simple::XS", class_stash, 16,0))
+            return NULL;
+    }
+    address = SvIV(sv);
+    if (!address) croak("Heap::Simple::XS object is a NULL pointer");
+    *object = sv;
+    return INT2PTR(heap, address);
+}
+
 static void extend(heap h) {
     h->allocated = 2*(h->used+4);
     if (h->fast) {
@@ -111,8 +253,8 @@ static const char *elements_name(heap h) {
       case FUNCTION: return "Function";
       case ANY_ELEM: return "Any";
       case 0: croak("Element type is unspecified");
+      default: croak("Assertion: Impossible element type %d", h->elements);
     }
-    croak("Assertion: Impossible element type %d", h->elements);
     /* NOTREACHED */
     return NULL;
 }
@@ -125,19 +267,19 @@ static const char *order_name(heap h) {
       case GT:   return "gt";
       case CODE_ORDER: return "CODE";
       case 0: croak("Order type is unspecified");
+      default: croak("Assertion: Impossible order type %d", h->elements);
     }
-    croak("Assertion: Impossible order type %d", h->elements);
     /* NOTREACHED */
     return NULL;
 }
 
 /*  KEY only gets called if h->fast == 0 */
-#define KEY(h, i) ((h)->wrapped ? (h)->keys[i] : fetch_key((h),(h)->values[i]))
+#define KEY(h, i) ((h)->wrapped ? (h)->keys[i] : fetch_key(aTHX_ (h),(h)->values[i]))
 /* FKEY only gets called if h->fast == 1 */
 #define FKEY(type, h, i)	(((type *)(h)->keys)[i])
 /* key is returned with the refcount unincremented,
    key will not have get magic applied */
-static SV *fetch_key(heap h, SV *value) {
+static SV *fetch_key(pTHX_ heap h, SV *value) {
     switch(h->elements) {
         AV *av;
         HV *hv;
@@ -172,14 +314,12 @@ static SV *fetch_key(heap h, SV *value) {
       case METHOD:
           {
               dSP;
-              const char *name;
 
               start = (SP) - PL_stack_base;
-              name = SvPV_nolen(h->hkey);
               PUSHMARK(SP);
               XPUSHs(value);
               PUTBACK;
-              count = call_method(name, G_SCALAR);
+              count = call_sv(h->hkey, G_SCALAR | G_METHOD);
               if (count != 1) croak("Forced scalar context call succeeded in returning %d values. This is impossible", (int) count);
 
               SPAGAIN;
@@ -235,19 +375,19 @@ static int less(pTHX_ heap h, SV *l, SV *r) {
     switch(h->order) {
       case LESS:
         /* pp_lt(); */
-        (void)*(PL_ppaddr[OP_LT])(aTHX);
+        PL_ppaddr[OP_LT](aTHX);
         break;
       case MORE:
         /* pp_gt(); */
-        (void)*(PL_ppaddr[OP_GT])(aTHX);
+        PL_ppaddr[OP_GT](aTHX);
         break;
       case LT:
         /* pp_slt(); */
-        (void)*(PL_ppaddr[OP_SLT])(aTHX);
+        PL_ppaddr[OP_SLT](aTHX);
         break;
       case GT:
         /* pp_sgt(); */
-        (void)*(PL_ppaddr[OP_SGT])(aTHX);
+        PL_ppaddr[OP_SGT](aTHX);
         break;
       case CODE_ORDER:
         count = call_sv(h->order_sv, G_SCALAR);
@@ -270,7 +410,7 @@ static int less(pTHX_ heap h, SV *l, SV *r) {
 
 /* key and value have refcount not increaded at call */
 static void key_insert(pTHX_ heap h, SV *key, SV *value) {
-    UV p, pos, l, n;
+    size_t p, pos, l, n;
     SV *new, *t1, *t2;
     int val_copied, key_copied;
 
@@ -280,10 +420,10 @@ static void key_insert(pTHX_ heap h, SV *key, SV *value) {
 
         if (!key) {
             if (MAGIC && SvGMAGICAL(value)) {
-                value = sv_mortalcopy(value);
+                value = MORTALCOPY(value);
                 val_copied = 1;
             }
-            key = fetch_key(h, value);
+            key = fetch_key(aTHX_ h, value);
         }
         /* SvNV will handle get magic (though sv_2nv) */
         if      (h->order == LESS) k =  SvNV(key);
@@ -341,18 +481,16 @@ static void key_insert(pTHX_ heap h, SV *key, SV *value) {
 
         pos = h->used;
         if (h->used >= h->allocated) extend(h);
+        FKEY(NV, h, 0) = k;
         if (h->has_values) {
             new = val_copied ? SvREFCNT_inc(value) : newSVsv(value);
-            while (pos > 1 && 
-                   k < (FKEY(NV, h, pos) = FKEY(NV, h, pos/2))) {
-                h->values[pos] = h->values[pos/2];
-                pos /= 2;
+            while (k < (FKEY(NV, h, pos) = FKEY(NV, h, pos >> 1))) {
+                h->values[pos] = h->values[pos >> 1];
+                pos >>= 1;
             }
             h->values[pos] = new;
-        } else {
-            while (pos > 1 && k < (FKEY(NV, h, pos) = FKEY(NV, h, pos/2)))
-                pos /= 2;
-        }
+        } else
+            while (k < (FKEY(NV, h, pos) = FKEY(NV, h, pos >> 1))) pos >>= 1;
         FKEY(NV, h, pos) = k;
         h->used++;
         return;
@@ -367,10 +505,10 @@ static void key_insert(pTHX_ heap h, SV *key, SV *value) {
         if (h->wrapped) {
             if (!key) {
                 if (MAGIC && SvGMAGICAL(value)) {
-                    value = sv_mortalcopy(value);
+                    value = MORTALCOPY(value);
                     val_copied = 1;
                 }
-                key = fetch_key(h, value);
+                key = fetch_key(aTHX_ h, value);
             }
             /* newSVsv does get magic */
             h->keys[1] = newSVsv(key);
@@ -383,13 +521,13 @@ static void key_insert(pTHX_ heap h, SV *key, SV *value) {
     /* We are certain we will need the key now. Fetch it. */
     if (!key) {
         if (MAGIC && SvGMAGICAL(value)) {
-            value = sv_mortalcopy(value);
+            value = MORTALCOPY(value);
             val_copied = 1;
         }
-        key = fetch_key(h, value);
+        key = fetch_key(aTHX_ h, value);
     }
     if (MAGIC && SvGMAGICAL(key)) {
-        key = sv_mortalcopy(key);
+        key = MORTALCOPY(key);
         key_copied = 1;
     } else key_copied = 0;
 
@@ -406,7 +544,7 @@ static void key_insert(pTHX_ heap h, SV *key, SV *value) {
 
         while (l < n) {
             key1 = KEY(h, l);
-            if (MAGIC && SvGMAGICAL(key1)) key1 = sv_mortalcopy(key1);
+            if (MAGIC && SvGMAGICAL(key1)) key1 = MORTALCOPY(key1);
             key2 = KEY(h, l+1);
             if (less(aTHX_ h, key1, key)) {
                 if (less(aTHX_  h, key2, key1)) l++;
@@ -471,7 +609,7 @@ static void key_insert(pTHX_ heap h, SV *key, SV *value) {
    Only to be called if there is at least element, so with h->used >= 2 */
 static SV *extract_top(pTHX_ heap h) {
     SV *t1, *t2;
-    UV l, n;
+    size_t l, n;
 
     n = h->used-2;
     l = 2;
@@ -519,7 +657,7 @@ static SV *extract_top(pTHX_ heap h) {
         key = KEY(h, h->used-1);
         while (l < n) {
             key1 = KEY(h, l);
-            if (MAGIC && SvGMAGICAL(key1)) key1 = sv_mortalcopy(key1);
+            if (MAGIC && SvGMAGICAL(key1)) key1 = MORTALCOPY(key1);
             key2 = KEY(h, l+1);
             if (less(aTHX_ h, key1, key)) {
                 if (less(aTHX_  h, key2, key1)) l++;
@@ -558,7 +696,7 @@ static SV *extract_top(pTHX_ heap h) {
     return t1;
 }
 
-void option(heap h, SV *tag, SV *value) {
+static void option(pTHX_ heap h, SV *tag, SV *value) {
     STRLEN len;
     /* SvPV does magic fetch */
     char *name = SvPV(tag, len);
@@ -595,8 +733,8 @@ void option(heap h, SV *tag, SV *value) {
                 if (fetched) name = SvPV(*fetched, len);
                 if (!fetched || !SvOK(*fetched))
                     croak("option elements has no type defined at index 0");
-                if (len == 6 && low_eq(name, "scalar") ||
-                    len == 3 && low_eq(name, "key")) {
+                if ((len == 6 && low_eq(name, "scalar")) ||
+                    (len == 3 && low_eq(name, "key"))) {
                     if (av_len(av) > 0)
                         warn("Extra arguments to Scalar ignored");
                     h->elements = SCALAR;
@@ -649,8 +787,8 @@ void option(heap h, SV *tag, SV *value) {
                     if (index) h->hkey = newSVsv(*index);
                     if (!index || !SvOK(*index))
                         croak("missing key method for %"SVf, *fetched);
-                } else if (len == 8 && low_eq(name, "function") ||
-                           len == 3 && low_eq(name, "any")) {
+                } else if ((len == 8 && low_eq(name, "function")) ||
+                           (len == 3 && low_eq(name, "any"))) {
                     SV **index;
                     if (toLOWER(name[0]) == 'f') {
                         h->elements = FUNCTION;
@@ -673,12 +811,11 @@ void option(heap h, SV *tag, SV *value) {
                     if (index) h->hkey = newSVsv(*index);
                     if (!index || !SvOK(*index))
                         croak("missing key function for %"SVf, *fetched);
-                } else
-                    croak("Unknown element type '%"SVf"'", *fetched);
+                } else croak("Unknown element type '%"SVf"'", *fetched);
             } else {
                 name = SvPV(value, len);
-                if      (len == 6 && low_eq(name, "scalar") ||
-                         len == 3 && low_eq(name, "key"))
+                if      ((len == 6 && low_eq(name, "scalar")) ||
+                          (len == 3 && low_eq(name, "key")))
                     h->elements = SCALAR;
                 else if (len == 5 && low_eq(name, "array")) {
                     h->elements = ARRAY;
@@ -783,7 +920,7 @@ new(char *class, ...)
     RETVAL = sv_newmortal();
     sv_setref_pv(RETVAL, class, (void*) h);
 
-    for (i=1; i<items; i+=2) option(h, ST(i), ST(i+1));
+    for (i=1; i<items; i+=2) option(aTHX_ h, ST(i), ST(i+1));
 
     if (!h->order) h->order    = LESS;
     if (!h->infinity) switch(h->order) {
@@ -906,7 +1043,7 @@ extract_upto(heap h, SV *border)
             if (h->used < 2) break;
         }
     } else {
-        if (MAGIC && SvGMAGICAL(border)) border = sv_mortalcopy(border);
+        if (MAGIC && SvGMAGICAL(border)) border = MORTALCOPY(border);
         while (1) {
             PUTBACK;
             if (less(aTHX_ h, border, KEY(h, 1))) {
@@ -1015,9 +1152,9 @@ SV *
 key(heap h, SV *value)
   CODE:
     if (h->fast) {
-        RETVAL = newSVnv(SvNV(fetch_key(h, value)));
+        RETVAL = newSVnv(SvNV(fetch_key(aTHX_ h, value)));
     } else {
-        RETVAL = SvREFCNT_inc(fetch_key(h, value));
+        RETVAL = SvREFCNT_inc(fetch_key(aTHX_ h, value));
     }
 
   OUTPUT:
@@ -1028,38 +1165,30 @@ _absorb(SV * heap1, SV *heap2)
   PREINIT:
     int copied2;
     SV *heap1_ref, *value;
-    IV tmp;
-    heap h1;
+    heap h1, h2;
   PPCODE:
     /* Helper for absorb, puts h1 into h2 */
-    if (sv_derived_from(heap1, "Heap::Simple::XS")) {
-        heap1_ref = (SV*) SvRV(heap1);
-        tmp = SvIV(heap1_ref);
-        h1 = INT2PTR(heap, tmp);
-    } else if (!SvOK(heap1)) croak("h1 is undefined");
-    else croak("h1 is not of type Heap::Simple::XS");
+    h1 = C_HEAP(heap1, "heap1");
+    /* Keep argument alive for the duration */
+    heap1_ref = SvRV(heap1);
+    sv_2mortal(SvREFCNT_inc(heap1_ref));
     if (h1->used < 2) XSRETURN_EMPTY;
     if (h1->locked) croak("recursive heap change");
     SAVEINT(h1->locked);
     h1->locked = 1;
 
     if (MAGIC && SvMAGICAL(heap2)) {
-        heap2 = sv_mortalcopy(heap2);
+        heap2 = MORTALCOPY(heap2);
         copied2 = 1;
     } else copied2 = 0;
     /* If we are an XS heap, the argument probably is too */
-    if (sv_derived_from(heap2, "Heap::Simple::XS")) {
-        heap h2;
-        SV *heap2_ref;
-
-        heap2_ref = (SV*) SvRV(heap2);
-        tmp = SvIV(heap2_ref);
-        h2 = INT2PTR(heap, tmp);
+    h2 = TRY_C_HEAP(heap2);
+    if (h2) {
         if (h1 == h2) croak("Self absorption");
 
-        /* Keep arguments alive for the duration */
-        sv_2mortal(SvREFCNT_inc(heap1_ref));
-        if (!copied2) sv_2mortal(SvREFCNT_inc(heap2_ref));
+        /* Keep argument alive for the duration */
+        /* heap2 is now the object, not the object pointer */ 
+        if (!copied2) sv_2mortal(SvREFCNT_inc(heap2));
 
         if (h1->fast) value = sv_newmortal();
         while (h1->used >= 2) {
@@ -1086,7 +1215,7 @@ _absorb(SV * heap1, SV *heap2)
 
         ENTER;
         /* Simple way to keep the refcount up at both levels */
-        if (!copied2) heap2 = sv_mortalcopy(heap2);
+        if (!copied2) heap2 = MORTALCOPY(heap2);
         if (h1->fast) value = sv_newmortal();
         while (h1->used >= 2) {
             SAVETMPS;
@@ -1122,39 +1251,31 @@ _key_absorb(SV * heap1, SV *heap2)
   PREINIT:
     int copied2;
     SV *heap1_ref, *key, *value;
-    IV tmp;
-    heap h1;
+    heap h1, h2;
   PPCODE:
     /* Helper for absorb, puts h1 into h2 */
-    if (sv_derived_from(heap1, "Heap::Simple::XS")) {
-        heap1_ref = (SV*) SvRV(heap1);
-        tmp = SvIV(heap1_ref);
-        h1 = INT2PTR(heap, tmp);
-    } else if (!SvOK(heap1)) croak("h1 is undefined");
-    else croak("h1 is not of type Heap::Simple::XS");
+    h1 = C_HEAP(heap1, "heap1");
+    /* Keep arguments alive for the duration */
+    heap1_ref = SvRV(heap1);
+    sv_2mortal(SvREFCNT_inc(heap1_ref));
     if (h1->used < 2) XSRETURN_EMPTY;
     if (h1->locked) croak("recursive heap change");
     SAVEINT(h1->locked);
     h1->locked = 1;
 
     if (MAGIC && SvMAGICAL(heap2)) {
-        heap2 = sv_mortalcopy(heap2);
+        heap2 = MORTALCOPY(heap2);
         copied2 = 1;
     } else copied2 = 0;
     /* If we are an XS heap, the argument probably is too */
-    if (sv_derived_from(heap2, "Heap::Simple::XS")) {
-        heap h2;
-        SV *heap2_ref;
-
-        heap2_ref = (SV*) SvRV(heap2);
-        tmp = SvIV(heap2_ref);
-        h2 = INT2PTR(heap, tmp);
+    h2 = TRY_C_HEAP(heap2);
+    if (h2) {
         if (h1 == h2) croak("Self absorption");
         if (!h2->key_ops) croak("This heap type does not support key_insert");
 
         /* Keep arguments alive for the duration */
-        sv_2mortal(SvREFCNT_inc(heap1_ref));
-        if (!copied2) sv_2mortal(SvREFCNT_inc(heap2_ref));
+        /* heap2 is now the object, not the object pointer */ 
+        if (!copied2) sv_2mortal(SvREFCNT_inc(heap2));
 
         if (h1->fast)        key   = sv_newmortal();
         if (!h1->has_values) value = sv_newmortal();
@@ -1191,7 +1312,7 @@ _key_absorb(SV * heap1, SV *heap2)
         /* We will push up to three arguments */
         EXTEND(SP, 3);
         /* Simple way to keep the refcount up at both levels */
-        if (!copied2) heap2 = sv_mortalcopy(heap2);
+        if (!copied2) heap2 = MORTALCOPY(heap2);
 
         if (h1->fast)        key   = sv_newmortal();
         if (!h1->has_values) value = sv_newmortal();
@@ -1238,7 +1359,7 @@ absorb(SV *heap1, SV *heap2)
   PREINIT:
     I32 count;
   PPCODE:
-    if (MAGIC && SvMAGICAL(heap2)) heap2 = sv_mortalcopy(heap2);
+    if (MAGIC && SvMAGICAL(heap2)) heap2 = MORTALCOPY(heap2);
     PUSHMARK(SP);
     PUSHs(heap2);
     PUSHs(heap1);
@@ -1256,7 +1377,7 @@ key_absorb(SV *heap1, SV *heap2)
   PREINIT:
     I32 count;
   PPCODE:
-    if (MAGIC && SvMAGICAL(heap2)) heap2 = sv_mortalcopy(heap2);
+    if (MAGIC && SvMAGICAL(heap2)) heap2 = MORTALCOPY(heap2);
     PUSHMARK(SP);
     PUSHs(heap2);
     PUSHs(heap1);

@@ -3,6 +3,22 @@ Revision history for Perl extension Heap::Simple::XS.
 Plan:
 	- dirty strings
         - add tests for self-locking
+        - taint (and utf8 ?) propegation testing of accessors
+	- calling perlops without being sure there is a pad target is a bug
+        - Deleting
+
+0.07  2005-07-27
+	- removed a stray print from t/speed_array
+	- added a forgotten static to option()
+        - call_method -> call_sv for Object types
+	- use no-stealing mortalcopies
+	- Start using PERL_NO_GET_CONTEXT.
+	- Replaced :: by - in author email address (easier quoting for mailers)
+	- use size_t to index the data array. This should select the minimal
+	  sensible data width.
+	- Replaced sv_derived_from object access by much more sophisticated 
+          tests
+        - Don't run benchmarks unless asked for during Makefile.PL
 
 0.06  2004-11-12
 	- perl 5.6.1 doesn't yet have XST_mUV or XSRETURN_UV, nor were they in
@@ -38,7 +54,7 @@ Plan:
         - Didn't properly free stuff already allocated if new croaks (bugfix)
 
 0.01  2004-10-25
-        - First Releasable version.
+        - First releasable version.
 
 0.00  2004-10-12
 	- original version; created by h2xs 1.23 with options

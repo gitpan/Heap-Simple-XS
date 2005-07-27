@@ -3,14 +3,7 @@ heap		T_PTROBJ_HEAP
 
 INPUT
 T_PTROBJ_HEAP
-        /* sv_derived_from does get magic */
-	if (sv_derived_from($arg, \"Heap::Simple::XS\")) {
-            SV *sv = (SV*) SvRV($arg);
-	    IV tmp = SvIV(sv);
-	    $var = INT2PTR($type, tmp);
-            sv_2mortal(SvREFCNT_inc(sv));
-        } else if (!SvOK($arg)) croak(\"$var is undefined\");
-	else croak(\"$var is not of type Heap::Simple::XS\")
+        $var = C_HEAP($arg, \"$var\");
 
 OUTPUT
 T_PTROBJ_HEAP

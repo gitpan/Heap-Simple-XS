@@ -10,8 +10,9 @@ use FindBin qw($Bin);
 use Test::More tests => 2;
 
 my $cachegrind  = 0;
-my $simple_only = 0;
+my $simple_only = 1;
 my $dirty       = 0;
+
 my $calibrate	= 5;
 
 # Don't use insanely much memory even on very fast computers
@@ -22,9 +23,35 @@ BEGIN {
     $hires = eval 'use Time::HiRes qw(time); 1';
     @Heap::Simple::implementors = qw(Heap::Simple::XS) unless
         @Heap::Simple::implementors;
-    use_ok("Heap::Simple");
 };
-is(Heap::Simple->implementation, "Heap::Simple::XS");
+
+my $option_file = "$Bin/options";
+my %options;
+open(my $fh, $option_file) || die "Could not open '$option_file': $!";
+{
+    local $_;
+    while (<$fh>) {
+        s/#.*//;
+        next unless /\S/;
+        my ($name, $value) =
+            /^\s*(BENCHMARK|BENCHMARK_OTHERS|DIRTY|VALGRIND)\s*=\s*(\S+)\s*$/ or
+            die "Could not parse line $. of $option_file\n";
+        $options{$name} = $value;
+    }
+}
+close($fh) || die "Could not close '$option_file': $!";
+
+SKIP: {
+    skip "No benchmark requested", 2 unless $options{BENCHMARK};
+    use_ok("Heap::Simple");
+    is(Heap::Simple->implementation, "Heap::Simple::XS");
+}
+exit if !$options{BENCHMARK};
+
+$simple_only = !$options{BENCHMARK_OTHERS} if
+    exists $options{BENCHMARK_OTHERS};
+$cachegrind = $options{VALGRIND} if exists $options{VALGRIND};
+$dirty      = $options{DIRTY}    if exists $options{DIRTY};
 
 my $class = Heap::Simple->implementation;
 $dirty = 1 if !defined $dirty && $class eq "Heap::Simple::XS";
@@ -118,7 +145,7 @@ for my $string (0) {
         run("speed_hash",   %options, class  => $class, dirty => $dirty);
         run("speed_array",  %options, class  => $class, dirty => $dirty);
         run("speed_scalar", %options, class  => $class, dirty => $dirty);
-        run("speed_scalar", %options, class  => $class, dirty => 1) if 
+        run("speed_scalar", %options, class  => $class, dirty => 1) if
             !$dirty && $class ne "Heap::Simple::Perl";
     }
 }
