@@ -12,7 +12,6 @@ use Test::More tests => 2;
 my $cachegrind  = 0;
 my $simple_only = 1;
 my $dirty       = 0;
-
 my $calibrate	= 5;
 
 # Don't use insanely much memory even on very fast computers

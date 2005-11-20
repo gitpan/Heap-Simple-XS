@@ -2,7 +2,7 @@ package Heap::Simple::XS;
 use strict;
 # use warnings;
 
-our $VERSION = "0.07";
+our $VERSION = "0.08";
 
 require XSLoader;
 XSLoader::load('Heap::Simple::XS', $VERSION);
@@ -48,9 +48,17 @@ overloading and magic (like L<ties|perltie>).
 
 =item
 
-The dirty option will cause scalars for the C<E<lt>> and C<E<gt>> orders
+The dirty option will do several things.
+
+=over 4
+
+=item
+
+It will cause scalars for the C<E<lt>> and C<E<gt>> orders
 to be stored internally as an NV (double or long double). This means you lose
 magic, overload and any internal integer representation.
+
+=item
 
 The C<E<lt>> and C<E<gt>> order will cause C<Array> and C<Hash> elements
 to get their key internally cached as an NV. So indirect changes to the value
@@ -60,12 +68,18 @@ return true for L<wrapped|Heap::Simple/wrapped> and support
 L<key_insert|Heap::Simple/key_insert> and 
 L<key_absorb|Heap::Simple/key_absorb>.
 
+=item
+
 The C<E<lt>> and C<E<gt>> order will cause C<Object> and C<Any> elements
 to store the key as an NV (these two already were wrapped heap types).
+
+=item
 
 It has no effect on C<Method> and C<Function> element types since it's 
 assumed you B<want> the key recalculations for these for some reason (if you 
 didn't, you would have asked for C<Object> or C<Any> elements).
+
+=back
 
 =item
 

@@ -6,6 +6,16 @@ Plan:
         - taint (and utf8 ?) propegation testing of accessors
 	- calling perlops without being sure there is a pad target is a bug
         - Deleting
+	- Higher splitfactor (better for the cache). Maybe go for 4
+          (highest factor that doesn't increase the amount of compares)
+
+0.08
+	- Remove pointless sv_reftype test from object access.
+	- Add extract_all
+	- absorb and key_absorb now take any number of heaps as argument 
+          instead of absorbing exactly one.
+        - Add mass insert/key_insert/_key_insert. Use them in absorb.
+	- Added merge_arrays
 
 0.07  2005-07-27
 	- removed a stray print from t/speed_array

@@ -16,6 +16,7 @@
 #endif /* INFINITY */
 
 #define MORTALCOPY(sv) sv_2mortal(newSVsv(sv))
+#define MAX_SIZE	((size_t) -1)
 
 enum order {
     LESS = 1,
@@ -45,16 +46,15 @@ typedef struct heap {
     SV *order_sv;	/* Code reference to compare keys for the CODE order */
     SV *infinity;	/* The infinity for the given order, can be NULL */
     SV *user_data;	/* Associated data, only for the user */
-    UV used;		/* How many values/keys are used+1 (index 0 unused) */
-    UV allocated;	/* How many values/keys are allocated */
-    UV max_count;	/* Maximum heap size, (UV) -1 means unlimited */
+    size_t used;	/* How many values/keys are used+1 (index 0 unused) */
+    size_t allocated;	/* How many values/keys are allocated */
+    size_t max_count;	/* Maximum heap size, MAX_SIZE means unlimited */
     I32 aindex;		/* A value used for indexing the key for a value */
     int wrapped;	/* True if keys are stored seperate from values */
     int fast;		/* True means that keys are scalars, not SV's */
     int has_values;	/* SV values in the SV array. False for fast scalars */
     int dirty;		/* "dirty" option was given and true */
-    int can_die;	/* Just remembers if the option was given,
-			   This implementation is supposed to always be safe */
+    int can_die;	/* used to choose between mass-heapify or one-by-one */
     int key_ops;        /* key_insert, _key_insert and key_absorb will work */
     int locked;
     enum order order;	/* Which order is used */
@@ -62,7 +62,7 @@ typedef struct heap {
 } *heap;
 
 /*
-    O: not filed in
+    O: not filled in
     X: Filled in, but not an SV (only happens for keys, if and only if fast)
     *: Filled in with an SV     (if and only if has_values)
 
@@ -77,9 +77,20 @@ typedef struct heap {
      (0       1      1      X*    normal heap with dirty order) # dropped
       1       1      1      X*    Object/Any heap with dirty order
 
-
       looks "wrapped" to the outside world for the last 3 cases
  */
+
+typedef struct merge {
+    SV *key;
+    AV *array;
+    I32 index;
+} merge;
+
+typedef struct fast_merge {
+    AV *array;
+    I32 index;
+    NV key;
+} fast_merge;
 
 /* Duplicate from perl source (since it's not exported unfortunately) */
 static bool my_isa_lookup(pTHX_ HV *stash, const char *name, HV* name_stash,
@@ -167,28 +178,24 @@ static bool my_isa_lookup(pTHX_ HV *stash, const char *name, HV* name_stash,
 
 static heap c_heap(pTHX_ SV *object, const char *context) {
     SV *sv;
-    const char *type;
     HV *stash, *class_stash;
     IV address;
 
-    SvGETMAGIC(object);
+    if (MAGIC) SvGETMAGIC(object);
     if (!SvROK(object)) {
         if (SvOK(object)) croak("%s is not a reference", context);
         croak("%s is undefined", context);
     }
     sv = SvRV(object);
-    type = sv_reftype(sv,0);
-    if (!type || !strEQ(type, "Heap::Simple::XS")) {
-        if (!SvOBJECT(sv)) croak("%s is not an object reference", context);
-        stash = SvSTASH(sv);
-        /* Is the next even possible ? */
-        if (!stash) croak("%s is not a typed reference", context);
-        class_stash = gv_stashpv("Heap::Simple::XS", FALSE);
-        if (!my_isa_lookup(aTHX_ stash, "Heap::Simple::XS", class_stash, 16,0))
-            croak("%s is not a Heap::Simple::XS reference", context);
-    }
+    if (!SvOBJECT(sv)) croak("%s is not an object reference", context);
+    stash = SvSTASH(sv);
+    /* Is the next even possible ? */
+    if (!stash) croak("%s is not a typed reference", context);
+    class_stash = gv_stashpv("Heap::Simple::XS", FALSE);
+    if (!my_isa_lookup(aTHX_ stash, "Heap::Simple::XS", class_stash, 16, 0))
+        croak("%s is not a Heap::Simple::XS reference", context);
     address = SvIV(sv);
-    if (!address) 
+    if (!address)
         croak("Heap::Simple::XS object %s has a NULL pointer", context);
     return INT2PTR(heap, address);
 }
@@ -197,31 +204,30 @@ static heap c_heap(pTHX_ SV *object, const char *context) {
 
 static heap try_c_heap(pTHX_ SV **object) {
     SV *sv;
-    const char *type;
     HV *stash, *class_stash;
     IV address;
 
     sv = *object;
     if (!SvROK(sv)) return NULL;
     sv = SvRV(sv);
-    type = sv_reftype(sv,0);
-    if (!type || !strEQ(type, "Heap::Simple::XS")) {
-        if (!SvOBJECT(sv)) return NULL;
-        stash = SvSTASH(sv);
-        /* Is the next even possible ? */
-        if (!stash) return NULL;
-        class_stash = gv_stashpv("Heap::Simple::XS", FALSE);
-        if (!my_isa_lookup(aTHX_ stash, "Heap::Simple::XS", class_stash, 16,0))
-            return NULL;
-    }
+    if (!SvOBJECT(sv)) return NULL;
+    stash = SvSTASH(sv);
+    /* Is the next even possible ? */
+    if (!stash) return NULL;
+    class_stash = gv_stashpv("Heap::Simple::XS", FALSE);
+    if (!my_isa_lookup(aTHX_ stash, "Heap::Simple::XS", class_stash, 16,0))
+        return NULL;
     address = SvIV(sv);
     if (!address) croak("Heap::Simple::XS object is a NULL pointer");
     *object = sv;
     return INT2PTR(heap, address);
 }
 
-static void extend(heap h) {
-    h->allocated = 2*(h->used+4);
+static void extend(heap h, size_t min_extra) {
+    min_extra += 3+h->used;
+    h->allocated = 2*h->used;
+    if (h->allocated < min_extra) h->allocated = min_extra;
+    /* if (h->allocated > MAX_INT) croak("Allocation overflow"); */
     if (h->fast) {
         NV *tmp;
         tmp = (NV *) h->keys;
@@ -302,7 +308,7 @@ static SV *fetch_key(pTHX_ heap h, SV *value) {
         he = hv_fetch_ent(hv, h->hkey, 0, h->aindex);
         if (he) {
             /* HASH value for magical hashes seem to jump around */
-            if (!h->aindex && !(MAGIC && SvMAGICAL(hv))) 
+            if (!h->aindex && !(MAGIC && SvMAGICAL(hv)))
                 h->aindex = HeHASH(he);
             return HeVAL(he);
         } else {
@@ -360,7 +366,7 @@ static SV *fetch_key(pTHX_ heap h, SV *value) {
     return NULL;
 }
 
-/* should be able to handle get magic if needed, 
+/* should be able to handle get magic if needed,
    but will normally be called without */
 static int less(pTHX_ heap h, SV *l, SV *r) {
     SV *result;
@@ -439,12 +445,12 @@ static void key_insert(pTHX_ heap h, SV *key, SV *value) {
                resistance agains crashes of less/fetch_key */
             n = h->used-1;
             l = 2;
-            
+
             if (h->has_values) {
                 new = val_copied ? SvREFCNT_inc(value) : newSVsv(value);
                 t1 = h->values[1];
             }
-            
+
             while (l < n) {
                 key1 = FKEY(NV, h, l);
                 key2 = FKEY(NV, h, l+1);
@@ -480,7 +486,7 @@ static void key_insert(pTHX_ heap h, SV *key, SV *value) {
         }
 
         pos = h->used;
-        if (h->used >= h->allocated) extend(h);
+        if (h->used >= h->allocated) extend(h, 1);
         FKEY(NV, h, 0) = k;
         if (h->has_values) {
             new = val_copied ? SvREFCNT_inc(value) : newSVsv(value);
@@ -501,7 +507,7 @@ static void key_insert(pTHX_ heap h, SV *key, SV *value) {
         /* Handled seperately in order to avoid an unneeded key fetch */
         if (h->used != 1) croak("Assertion: negative sized heap");
         if (h->max_count < 1) return;
-        if (h->allocated <= 1) extend(h);
+        if (h->allocated <= 1) extend(h, 1);
         if (h->wrapped) {
             if (!key) {
                 if (MAGIC && SvGMAGICAL(value)) {
@@ -587,7 +593,7 @@ static void key_insert(pTHX_ heap h, SV *key, SV *value) {
     pos = h->used;
 
     while (pos > 1 && less(aTHX_ h, key, KEY(h, pos/2))) pos /= 2;
-    if (h->used >= h->allocated) extend(h);
+    if (h->used >= h->allocated) extend(h, 1);
     new = val_copied ? SvREFCNT_inc(value) : newSVsv(value);
     if (h->wrapped) {
         /* Assume newSVsv can't die since key will already have been
@@ -605,8 +611,206 @@ static void key_insert(pTHX_ heap h, SV *key, SV *value) {
     h->used++;
 }
 
-/* Returns the top value with the refcount still increased 
-   Only to be called if there is at least element, so with h->used >= 2 */
+static void multi_insert(pTHX_ heap h, size_t first) {
+    size_t i;
+    SV *value;
+
+    /* Shut up warnings */
+    value = NULL;
+
+    if (h->fast) {
+        NV k, key1, key2;
+        size_t n, l;
+
+        n = h->used-1;
+        for (i = n/2; i>= first; i--) {
+            if (h->has_values) value = h->values[i];
+            k = FKEY(NV, h, i);
+            l = i*2;
+            while (l < n) {
+                key1 = FKEY(NV, h, l);
+                key2 = FKEY(NV, h, l+1);
+                if (key1 < k) {
+                    if (key2 < key1) {
+                        FKEY(NV, h, l/2) = key2;
+                        l++;
+                    } else {
+                        FKEY(NV, h, l/2) = key1;
+                    }
+                } else if (key2 < k) {
+                    FKEY(NV, h, l/2) = key2;
+                    l++;
+                } else break;
+                if (h->has_values) h->values[l/2] = h->values[l];
+                l *= 2;
+            }
+            if (l == n) {
+                key1 = FKEY(NV, h, l);
+                if (key1 < k) {
+                    FKEY(NV, h, l/2) = key1;
+                    if (h->has_values) h->values[l/2] = h->values[l];
+                    l*= 2;
+                }
+            }
+            l /= 2;
+            if (h->has_values) h->values[l] = value;
+            FKEY(NV, h, l) = k;
+        }
+        /* i is now points to the highest numbered old entry that needs to
+           be percolated */
+        first /= 2;
+        if (first < 1) first = 1;
+        /* the range [first..i] MUST be percolated */
+        if (i >= first) {
+            size_t *todo, *old_to, *new_to, *here;
+            New(__LINE__ % 1000, todo, i-first+2, size_t);
+            new_to = todo;
+            todo++;
+            while (i >= first) *++new_to = i--;
+
+            while (new_to >= todo) {
+                old_to = new_to;
+                new_to = todo-1;
+                *new_to = *old_to;
+                for (here = todo; here <= old_to; here++) {
+                    i = *here;
+                    if (h->has_values) value = h->values[i];
+                    k = FKEY(NV, h, i);
+                    l = i*2;
+                    while (l < n) {
+                        key1 = FKEY(NV, h, l);
+                        key2 = FKEY(NV, h, l+1);
+                        if (key1 < k) {
+                            if (key2 < key1) {
+                                FKEY(NV, h, l/2) = key2;
+                                l++;
+                            } else {
+                                FKEY(NV, h, l/2) = key1;
+                            }
+                        } else if (key2 < k) {
+                            FKEY(NV, h, l/2) = key2;
+                            l++;
+                        } else break;
+                        if (h->has_values) h->values[l/2] = h->values[l];
+                        l *= 2;
+                    }
+                    if (l == n) {
+                        key1 = FKEY(NV, h, l);
+                        if (key1 < k) {
+                            FKEY(NV, h, l/2) = key1;
+                            if (h->has_values) h->values[l/2] = h->values[l];
+                            l*= 2;
+                        }
+                    }
+                    l /= 2;
+                    if (h->has_values) h->values[l] = value;
+                    FKEY(NV, h, l) = k;
+                    /* Did entry i change ? */
+                    if (l != i && i/2 < *new_to && i >= 2) *++new_to = i/2;
+                }
+            }
+            todo--;
+            Safefree(todo);
+        }
+    } else {
+        SV *k, *key1, *key2;
+        size_t n, l;
+
+        n = h->used-1;
+        for (i = n/2; i>= first; i--) {
+            k = KEY(h, i);
+            value = h->values[i];
+            l = i*2;
+            while (l < n) {
+                key1 = KEY(h, l);
+                key2 = KEY(h, l+1);
+                if (less(aTHX_ h, key1, k)) {
+                    if (less(aTHX_ h, key2, key1)) {
+                        if (h->wrapped) h->keys[l/2] = key2;
+                        l++;
+                    } else {
+                        if (h->wrapped) h->keys[l/2] = key1;
+                    }
+                } else if (less(aTHX_ h, key2, k)) {
+                    if (h->wrapped) h->keys[l/2] = key2;
+                    l++;
+                } else break;
+                h->values[l/2] = h->values[l];
+                l *= 2;
+            }
+            if (l == n) {
+                key1 = KEY(h, l);
+                if (less(aTHX_ h, key1, k)) {
+                    if (h->wrapped) h->keys[l/2] = key1;
+                    h->values[l/2] = h->values[l];
+                    l*= 2;
+                }
+            }
+            l /= 2;
+            h->values[l] = value;
+            if (h->wrapped) h->keys[l] = k;
+        }
+        /* i is now points to the highest numbered old entry that needs to
+           be percolated */
+        first /= 2;
+        if (first < 1) first = 1;
+        /* the range [first..i] MUST be percolated */
+        if (i >= first) {
+            size_t *todo, *old_to, *new_to, *here;
+            New(__LINE__ % 1000, todo, i-first+2, size_t);
+            SAVEFREEPV(todo);
+            new_to = todo;
+            todo++;
+            while (i >= first) *++new_to = i--;
+
+            while (new_to >= todo) {
+                old_to = new_to;
+                new_to = todo-1;
+                *new_to = *old_to;
+                for (here = todo; here <= old_to; here++) {
+                    i = *here;
+                    value = h->values[i];
+                    k = KEY(h, i);
+                    l = i*2;
+                    while (l < n) {
+                        key1 = KEY(h, l);
+                        key2 = KEY(h, l+1);
+                        if (less(aTHX_ h, key1, k)) {
+                            if (less(aTHX_ h, key2, key1)) {
+                                if (h->wrapped) h->keys[l/2] = key2;
+                                l++;
+                            } else {
+                                if (h->wrapped) h->keys[l/2] = key1;
+                            }
+                        } else if (less(aTHX_ h, key2, k)) {
+                            if (h->wrapped) h->keys[l/2] = key2;
+                            l++;
+                        } else break;
+                        h->values[l/2] = h->values[l];
+                        l *= 2;
+                    }
+                    if (l == n) {
+                        key1 = KEY(h, l);
+                        if (less(aTHX_ h, key1, k)) {
+                            if (h->wrapped) h->keys[l/2] = key1;
+                            h->values[l/2] = h->values[l];
+                            l*= 2;
+                        }
+                    }
+                    l /= 2;
+                    h->values[l] = value;
+                    if (h->wrapped) h->keys[l] = k;
+                    /* Did entry i change ? */
+                    if (l != i && i/2 < *new_to && i >= 2) *++new_to = i/2;
+                }
+            }
+        }
+    }
+}
+
+/* Returns the top value with the refcount still increased
+   Only to be called if there is at least element, so with h->used >= 2
+   The non-fast version uses the stack, so wrap in PUTBACK/SPAGAIN ! */
 static SV *extract_top(pTHX_ heap h) {
     SV *t1, *t2;
     size_t l, n;
@@ -694,6 +898,32 @@ static SV *extract_top(pTHX_ heap h) {
         }
     }
     return t1;
+}
+
+static void reverse(heap h, size_t bottom, size_t top) {
+    while (top > bottom) {
+        SV *value, *key;
+
+        if (h->has_values) {
+            value = h->values[top];
+            h->values[top] = h->values[bottom];
+            h->values[bottom] = value;
+        }
+
+        if (h->fast) {
+            NV k;
+            k = FKEY(NV, h, top);
+            FKEY(NV, h, top) = FKEY(NV, h, bottom);
+            FKEY(NV, h, bottom) = k;
+        } else if (h->wrapped) {
+            key = h->keys[top];
+            h->keys[top] = h->keys[bottom];
+            h->keys[bottom] = key;
+        }
+
+        top--;
+        bottom++;
+    }
 }
 
 static void option(pTHX_ heap h, SV *tag, SV *value) {
@@ -847,14 +1077,14 @@ static void option(pTHX_ heap h, SV *tag, SV *value) {
       case 'm':
         if (len == 9 && strEQ(name, "max_count")) {
             NV max_count;
-            UV m;
-            if (h->max_count != (UV) -1) croak("Multiple max_count options");
+            size_t m;
+            if (h->max_count != MAX_SIZE) croak("Multiple max_count options");
             max_count = SvNV(value);
             if (max_count < 0) croak("max_count should not be negative");
             if (max_count == INFINITY) return;
-            if (max_count >= (UV) -1) 
+            if (max_count >= MAX_SIZE)
                 croak("max_count too big. Use infinity instead");
-            m = (UV) max_count;
+            m = (size_t) max_count;
             if (m != max_count) croak("max_count should be an integer");
             h->max_count = m;
             return;
@@ -929,20 +1159,22 @@ new(char *class, ...)
       case GT:   h->infinity = newSVpvn("", 0);         break;
       case LT: case CODE_ORDER: break;
       default:
-        croak("Assertion: No infinity handler for order '%s'", 
+        croak("Assertion: No infinity handler for order '%s'",
               order_name(h));
     }
     if (!h->elements) h->elements = SCALAR;
     if (h->dirty < 0) h->dirty = 0;
 
-    if (h->dirty && (h->order == LESS || h->order == MORE) && 
+    /* FUNCTION and METHOD are excluded for the simple reason that if you want
+       caching with them, you could use Any and Object instead */
+    if (h->dirty && (h->order == LESS || h->order == MORE) &&
         (h->elements != FUNCTION && h->elements != METHOD)) h->fast = 1;
     if (h->fast && h->order != LESS && h->order != MORE)
         croak("No fast %s order", order_name(h));
     if (h->fast && h->elements == SCALAR) h->has_values = 0;
     h->key_ops = h->wrapped || (h->fast && h->has_values);
     /* Can't happen, but let's just make sure */
-    if (h->wrapped && !h->has_values) 
+    if (h->wrapped && !h->has_values)
         croak("Assertion: wrapped but no has_values");
     SvREFCNT_inc(RETVAL);
   OUTPUT:
@@ -956,44 +1188,245 @@ count(heap h)
     RETVAL
 
 void
-insert(heap h, SV *value)
-  PPCODE:
+insert(heap h, ...)
+  PREINIT:
+    I32 i, more;
+    SV *key, *value;
+    size_t first;
+  CODE:
     if (h->locked) croak("recursive heap change");
     SAVEINT(h->locked);
     h->locked = 1;
     PUTBACK;
-    key_insert(aTHX_ h, NULL, value);
+    i = 1;
+    more = h->used-1+items-1 > h->max_count ?
+	h->max_count-(h->used-1) : items-1;
+    if (more > 1 && !h->can_die) {
+        if (h->used+more > h->allocated) extend(h, more);
+        first = h->used;
+        if (h->fast) {
+            NV k;
+
+            for (; i<more; i++) {
+                int val_copied;
+
+                value = ST(i);
+                if (MAGIC && SvGMAGICAL(value)) {
+                    value = MORTALCOPY(value);
+                    val_copied = 1;
+                } else val_copied = 0;
+
+                key = fetch_key(aTHX_ h, value);
+                /* SvNV will handle get magic (though sv_2nv) */
+                if      (h->order == LESS) k =  SvNV(key);
+                else if (h->order == MORE) k = -SvNV(key);
+                else croak("No fast %s order", order_name(h));
+
+                FKEY(NV, h, h->used) = k;
+                if (h->has_values)
+                    h->values[h->used] = val_copied ?
+                        SvREFCNT_inc(value) : newSVsv(value);
+                h->used++;
+            }
+        } else {
+            for (; i<more; i++) {
+                value = ST(i);
+                if (h->wrapped) {
+                    int val_copied, key_copied;
+
+                    if (MAGIC && SvGMAGICAL(value)) {
+                        value = MORTALCOPY(value);
+                        val_copied = 1;
+                    } else val_copied = 0;
+
+                    key = fetch_key(aTHX_ h, value);
+                    if (MAGIC && SvGMAGICAL(key)) {
+                        key = MORTALCOPY(key);
+                        key_copied = 1;
+                    } else key_copied = 0;
+                    h->values[h->used] =
+                        val_copied ? SvREFCNT_inc(value) : newSVsv(value);
+                    /* Assume newSVsv can't die since key will already
+                       have been (mortal)copied in case it's magic */
+                    h->keys[h->used] = key_copied ?
+                        SvREFCNT_inc(key) : newSVsv(key);
+                } else h->values[h->used] = newSVsv(value);
+
+                h->used++;
+            }
+        }
+        multi_insert(aTHX_ h, first);
+    }
+    for (; i<items; i++) key_insert(aTHX_ h, NULL, ST(i));
+    XSRETURN_EMPTY;
 
 void
-key_insert(heap h, SV *key, SV *value)
-  PPCODE:
+key_insert(heap h, ...)
+  PREINIT:
+    I32 i, more;
+    SV *key, *value;
+    size_t first;
+  CODE:
     if (!h->key_ops) croak("This heap type does not support key_insert");
+    if (items % 2 == 0) croak("Odd number of arguments");
     if (h->locked) croak("recursive heap change");
     SAVEINT(h->locked);
     h->locked = 1;
     PUTBACK;
-    key_insert(aTHX_ h, key, value);
+
+    i = 1;
+    more = h->used-1+items/2 > h->max_count ?
+	h->max_count-(h->used-1) : items/2;
+    if (more > 1 && !h->can_die) {
+        if (h->used+more > h->allocated) extend(h, more);
+        more = 2*more+1;
+        first = h->used;
+        if (h->fast) {
+            NV k;
+
+            for (; i<more; i+=2) {
+                int val_copied;
+
+                value = ST(i+1);
+
+                if (MAGIC && SvGMAGICAL(value)) {
+                    value = MORTALCOPY(value);
+                    val_copied = 1;
+                } else val_copied = 0;
+
+                key = ST(i);
+                /* SvNV will handle get magic (though sv_2nv) */
+                if      (h->order == LESS) k =  SvNV(key);
+                else if (h->order == MORE) k = -SvNV(key);
+                else croak("No fast %s order", order_name(h));
+
+                FKEY(NV, h, h->used) = k;
+                if (h->has_values)
+                    h->values[h->used] = val_copied ?
+                        SvREFCNT_inc(value) : newSVsv(value);
+                h->used++;
+            }
+        } else {
+            if (!h->wrapped) croak("Assertion: slow non-wrapped key_ops");
+            for (; i<more; i+=2) {
+                int val_copied, key_copied;
+
+                value = ST(i+1);
+
+                if (MAGIC && SvGMAGICAL(value)) {
+                    value = MORTALCOPY(value);
+                    val_copied = 1;
+                } else val_copied = 0;
+
+                key = ST(i);
+                if (MAGIC && SvGMAGICAL(key)) {
+                    key = MORTALCOPY(key);
+                    key_copied = 1;
+                } else key_copied = 0;
+                h->values[h->used] = val_copied ?
+                    SvREFCNT_inc(value) : newSVsv(value);
+                /* Assume newSVsv can't die since key will already
+                   have been (mortal)copied in case it's magic */
+                h->keys[h->used] = key_copied ?
+                    SvREFCNT_inc(key) : newSVsv(key);
+
+                h->used++;
+            }
+        }
+        multi_insert(aTHX_ h, first);
+    }
+    for (; i<items; i+=2) key_insert(aTHX_ h, ST(i), ST(i+1));
+    XSRETURN_EMPTY;
 
 void
-_key_insert(heap h, SV *pair)
+_key_insert(heap h, ...)
   PREINIT:
     AV *av;
-    SV **key, **value;
-  PPCODE:
+    SV *key, *value, **key_ref, **val_ref, *pair;
+    I32 i, more;
+    size_t first;
+  CODE:
     if (!h->key_ops) croak("This heap type does not support _key_insert");
-    if (MAGIC) SvGETMAGIC(pair);
-    if (!SvROK(pair)) croak("pair is not a reference");
-    av = (AV*) SvRV(pair);
-    if (SvTYPE(av) != SVt_PVAV) croak("pair is not an ARRAY reference");
-    key = av_fetch(av, 0, 0);
-    if (!key) croak("No key in the element array");
-    value = av_fetch(av, 1, 0);
-    if (!value) croak("No value in the element array");
     if (h->locked) croak("recursive heap change");
     SAVEINT(h->locked);
     h->locked = 1;
     PUTBACK;
-    key_insert(aTHX_ h, *key, *value);
+    i = 1;
+    more = h->used-1+items-1 > h->max_count ?
+	h->max_count-(h->used-1) : items-1;
+    if (more > 1 && !h->can_die) {
+        if (h->used+more > h->allocated) extend(h, more);
+        first = h->used;
+        if (!h->fast && !h->wrapped)
+            croak("Assertion: slow non-wrapped key_ops");
+        for (; i<more; i++) {
+            pair = ST(i);
+            if (MAGIC) SvGETMAGIC(pair);
+            if (!SvROK(pair)) croak("pair is not a reference");
+            av = (AV*) SvRV(pair);
+            if (SvTYPE(av) != SVt_PVAV) croak("pair is not an ARRAY reference");
+            key_ref = av_fetch(av, 0, 0);
+            if (!key_ref) croak("No key in the element array");
+            key = *key_ref;
+            val_ref = av_fetch(av, 1, 0);
+            if (!val_ref) croak("No value in the element array");
+            value = *val_ref;
+
+            if (h->fast) {
+                NV k;
+                int val_copied;
+
+                if (MAGIC && SvGMAGICAL(value)) {
+                    value = MORTALCOPY(value);
+                    val_copied = 1;
+                } else val_copied = 0;
+
+                /* SvNV will handle get magic (though sv_2nv) */
+                if      (h->order == LESS) k =  SvNV(key);
+                else if (h->order == MORE) k = -SvNV(key);
+                else croak("No fast %s order", order_name(h));
+
+                FKEY(NV, h, h->used) = k;
+                if (h->has_values)
+                    h->values[h->used] =
+                        val_copied ? SvREFCNT_inc(value) : newSVsv(value);
+            } else {
+                int val_copied, key_copied;
+
+                if (MAGIC && SvGMAGICAL(value)) {
+                    value = MORTALCOPY(value);
+                    val_copied = 1;
+                } else val_copied = 0;
+
+                if (MAGIC && SvGMAGICAL(key)) {
+                    key = MORTALCOPY(key);
+                    key_copied = 1;
+                } else key_copied = 0;
+                h->values[h->used] =
+                    val_copied ? SvREFCNT_inc(value) : newSVsv(value);
+                /* Assume newSVsv can't die since key will already
+                   have been (mortal)copied in case it's magic */
+                h->keys[h->used] = key_copied ?
+                    SvREFCNT_inc(key) : newSVsv(key);
+            }
+            h->used++;
+        }
+        multi_insert(aTHX_ h, first);
+    }
+    for (; i<items; i++) {
+        pair = ST(i);
+        if (MAGIC) SvGETMAGIC(pair);
+        if (!SvROK(pair)) croak("pair is not a reference");
+        av = (AV*) SvRV(pair);
+        if (SvTYPE(av) != SVt_PVAV) croak("pair is not an ARRAY reference");
+        key_ref = av_fetch(av, 0, 0);
+        if (!key_ref) croak("No key in the element array");
+        val_ref = av_fetch(av, 1, 0);
+        if (!val_ref) croak("No value in the element array");
+
+        key_insert(aTHX_ h, *key_ref, *val_ref);
+    }
+    XSRETURN_EMPTY;
 
 void
 extract_top(heap h)
@@ -1037,7 +1470,7 @@ extract_upto(heap h, SV *border)
         else if (h->order == MORE) b = -SvNV(border);
         else croak("No fast %s order", order_name(h));
         while (FKEY(NV, h, 1) <= b) {
-            /* No PUTBACK/SPAGAIN needed since fast extract top 
+            /* No PUTBACK/SPAGAIN needed since fast extract top
                won't change the stack */
             XPUSHs(sv_2mortal(extract_top(aTHX_ h)));
             if (h->used < 2) break;
@@ -1045,17 +1478,43 @@ extract_upto(heap h, SV *border)
     } else {
         if (MAGIC && SvGMAGICAL(border)) border = MORTALCOPY(border);
         while (1) {
+            SV *top;
+
             PUTBACK;
             if (less(aTHX_ h, border, KEY(h, 1))) {
                 SPAGAIN;
                 break;
             }
+            top = extract_top(aTHX_ h);
             SPAGAIN;
-            XPUSHs(sv_2mortal(extract_top(aTHX_ h)));
+            XPUSHs(sv_2mortal(top));
             if (h->used < 2) break;
         }
     }
-    if ((h->used+4)*4 < h->allocated) extend(h); /* shrink really */
+    if ((h->used+4)*4 < h->allocated) extend(h, 0); /* shrink really */
+
+void
+extract_all(heap h)
+  PPCODE:
+    if (h->locked) croak("recursive heap change");
+    SAVEINT(h->locked);
+    h->locked = 1;
+    /* Extends one too much. Who cares... */
+    EXTEND(SP, h->used);
+    EXTEND_MORTAL(h->used);
+    if (h->fast) {
+        /* No PUTBACK/SPAGAIN needed since fast extract top
+           won't change the stack */
+        while (h->used >= 2) XPUSHs(sv_2mortal(extract_top(aTHX_ h)));
+    } else while (h->used >= 2) {
+        SV *top;
+
+        PUTBACK;
+        top = extract_top(aTHX_ h);
+        SPAGAIN;
+        XPUSHs(sv_2mortal(top));
+    }
+    if ((1+4)*4 < h->allocated) extend(h, 0); /* shrink really */
 
 void
 top(heap h)
@@ -1091,10 +1550,12 @@ void
 keys(heap h)
   PREINIT:
     /* you can actally modify the values through the return */
-    UV i;
+    size_t i;
     SV *key;
   PPCODE:
-    EXTEND(SP, h->used-1);
+    /* Extends one too much. Who cares... */
+    EXTEND(SP, h->used);
+    EXTEND_MORTAL(h->used);
     if (h->fast) {
         if      (h->order == LESS) for (i=1; i<h->used; i++)
             PUSHs(sv_2mortal(newSVnv( FKEY(NV, h, i))));
@@ -1114,9 +1575,11 @@ void
 values(heap h)
   PREINIT:
     /* you can actally modify the values through the return */
-    UV i;
+    size_t i;
   PPCODE:
-    EXTEND(SP, h->used-1);
+    /* Extends one too much. Who cares... */
+    EXTEND(SP, h->used);
+    EXTEND_MORTAL(h->used);
     if (h->has_values) for (i=1; i<h->used; i++)
         PUSHs(sv_2mortal(SvREFCNT_inc(h->values[i])));
     else if (h->order == LESS) for (i=1; i<h->used; i++)
@@ -1146,7 +1609,7 @@ clear(heap h)
             SvREFCNT_dec(value);
         }
     }
-    if ((h->used+4)*4 < h->allocated) extend(h); /* shrink really */
+    if ((h->used+4)*4 < h->allocated) extend(h, 0); /* shrink really */
 
 SV *
 key(heap h, SV *value)
@@ -1163,7 +1626,7 @@ key(heap h, SV *value)
 void
 _absorb(SV * heap1, SV *heap2)
   PREINIT:
-    int copied2;
+    int copied2, one_by_one;
     SV *heap1_ref, *value;
     heap h1, h2;
   PPCODE:
@@ -1172,31 +1635,111 @@ _absorb(SV * heap1, SV *heap2)
     /* Keep argument alive for the duration */
     heap1_ref = SvRV(heap1);
     sv_2mortal(SvREFCNT_inc(heap1_ref));
-    if (h1->used < 2) XSRETURN_EMPTY;
     if (h1->locked) croak("recursive heap change");
     SAVEINT(h1->locked);
     h1->locked = 1;
+
+    if (h1->used < 2) XSRETURN_EMPTY;
 
     if (MAGIC && SvMAGICAL(heap2)) {
         heap2 = MORTALCOPY(heap2);
         copied2 = 1;
     } else copied2 = 0;
-    /* If we are an XS heap, the argument probably is too */
+    /* If we are an XS heap, the argument (h2) probably is too */
     h2 = TRY_C_HEAP(heap2);
     if (h2) {
+        size_t more, first;
+
         if (h1 == h2) croak("Self absorption");
+        PUTBACK;
 
         /* Keep argument alive for the duration */
-        /* heap2 is now the object, not the object pointer */ 
+        /* heap2 is now the object, not the object pointer */
         if (!copied2) sv_2mortal(SvREFCNT_inc(heap2));
+        more = h1->used-1;
+        if (h2->used-1+more > h2->max_count)
+            more = h2->max_count-(h2->used-1);
+        if (more <= 1) one_by_one = 1;
+        else one_by_one = h2->can_die;
+        if (!one_by_one) {
+            SV *key;
+            size_t top, bottom;
 
-        if (h1->fast) value = sv_newmortal();
+            if (h2->locked) croak("recursive heap change");
+            SAVEINT(h2->locked);
+            h2->locked = 1;
+
+            first = h2->used;
+            if (first+more > h2->allocated) extend(h2, more);
+
+            if (h2->fast) {
+                NV k;
+
+                while (more--) {
+                    if (h1->has_values) value = h1->values[h1->used-1];
+                    else if (h1->order == LESS)
+                        value = newSVnv(FKEY(NV, h1, h1->used-1));
+                    else if (h1->order == MORE)
+                        value = newSVnv(-FKEY(NV, h1, h1->used-1));
+                    else croak("No fast %s order", order_name(h1));
+                    if (h2->has_values) h2->values[h2->used] = value;
+                    else sv_2mortal(value);
+                    h2->used++;
+                    h1->used--;
+                    if (h1->wrapped && !h1->fast)
+                        SvREFCNT_dec(h1->keys[h1->used]);
+
+                    key = fetch_key(aTHX_ h2, value);
+                    /* SvNV will handle get magic (though sv_2nv) */
+                    if      (h2->order == LESS) k =  SvNV(key);
+                    else if (h2->order == MORE) k = -SvNV(key);
+                    else croak("No fast %s order", order_name(h2));
+                    FKEY(NV, h2, h2->used-1) = k;
+                }
+            } else {
+                while (more--) {
+                    if (h1->has_values) value = h1->values[h1->used-1];
+                    else if (h1->order == LESS)
+                        value = newSVnv(FKEY(NV, h1, h1->used-1));
+                    else if (h1->order == MORE)
+                        value = newSVnv(-FKEY(NV, h1, h1->used-1));
+                    else croak("No fast %s order", order_name(h1));
+
+                    if (h2->wrapped) {
+                        if (h1->has_values) {
+                            key = fetch_key(aTHX_ h2, value);
+                            h2->keys[h2->used] = newSVsv(key);
+                        } else {
+                            sv_2mortal(value);
+                            key = fetch_key(aTHX_ h2, value);
+                            h2->keys[h2->used] = newSVsv(key);
+                            SvREFCNT_inc(value);
+                        }
+                    }
+                    h2->values[h2->used] = value;
+                    h2->used++;
+                    h1->used--;
+                    if (h1->wrapped && !h1->fast)
+                        SvREFCNT_dec(h1->keys[h1->used]);
+                }
+            }
+            /* Reverse so that low elements are more likely to be on top
+               Only makes sense if the orders are likely to be the same.
+               It also depends on how a key is gets derived from a value,
+               so we just use the order attribute as heuristic
+            */
+            if (h1->order == h2->order) reverse(h2, first, h2->used-1);
+
+            h2->locked = 0;
+            multi_insert(aTHX_ h2, first);
+        }
+        if (h1->used >= 2 && h1->fast) value = sv_newmortal();
         while (h1->used >= 2) {
             SAVETMPS;
             if (h1->has_values) value = h1->values[h1->used-1];
-            else if (h1->order == LESS) 
+            else if (h1->order == LESS)
                 sv_setnv(value, FKEY(NV, h1, h1->used-1));
-            else if (h1->order == MORE) 
+            else if (h1->order == MORE)
                 sv_setnv(value, -FKEY(NV, h1, h1->used-1));
             else croak("No fast %s order", order_name(h1));
 
@@ -1205,7 +1748,7 @@ _absorb(SV * heap1, SV *heap2)
             h1->used--;
             if (h1->has_values) SvREFCNT_dec(value);
             if (h1->wrapped && !h1->fast) SvREFCNT_dec(h1->keys[h1->used]);
-            if ((h1->used+4)*4 < h1->allocated) extend(h1); /* shrink really */
+            if ((h1->used+4)*4 < h1->allocated) extend(h1, 0); /* shrink really */
             FREETMPS;
         }
     } else if (!SvOK(heap2)) croak("heap2 is undefined");
@@ -1213,37 +1756,83 @@ _absorb(SV * heap1, SV *heap2)
     else {
         I32 count;
 
-        ENTER;
         /* Simple way to keep the refcount up at both levels */
         if (!copied2) heap2 = MORTALCOPY(heap2);
-        if (h1->fast) value = sv_newmortal();
-        while (h1->used >= 2) {
-            SAVETMPS;
-            if (h1->has_values) value = h1->values[h1->used-1];
-            else if (h1->order == LESS) 
-                sv_setnv(value,  FKEY(NV, h1, h1->used-1));
-            else if (h1->order == MORE) 
-                sv_setnv(value, -FKEY(NV, h1, h1->used-1));
-            else croak("No fast %s order", order_name(h1));
+        if (h1->used <= 2) one_by_one = 1;
+        else {
             PUSHMARK(SP);
             PUSHs(heap2);
-            PUSHs(value);
             PUTBACK;
+            count = call_method("can_die", G_SCALAR);
+            if (count != 1) croak("Forced scalar context call succeeded in returning %d values. This is impossible", (int) count);
+            SPAGAIN;
+            value = POPs;
+            one_by_one = SvTRUE(value);
+        }
+        if (one_by_one) {
+            ENTER;
+            if (h1->fast) value = sv_newmortal();
+            while (h1->used >= 2) {
+                SAVETMPS;
+                if (h1->has_values) value = h1->values[h1->used-1];
+                else if (h1->order == LESS)
+                    sv_setnv(value,  FKEY(NV, h1, h1->used-1));
+                else if (h1->order == MORE)
+                    sv_setnv(value, -FKEY(NV, h1, h1->used-1));
+                else croak("No fast %s order", order_name(h1));
+                PUSHMARK(SP);
+                PUSHs(heap2);
+                PUSHs(value);
+                PUTBACK;
 
+                count = call_method("insert", G_VOID);
+
+                SPAGAIN;
+                if (count) {
+                    if (count < 0) croak("Forced void context call 'insert' succeeded in returning %d values. This is impossible", (int) count);
+                    SP -= count;
+                }
+                h1->used--;
+                if (h1->has_values) SvREFCNT_dec(value);
+                if (h1->wrapped && !h1->fast) SvREFCNT_dec(h1->keys[h1->used]);
+                if ((h1->used+4)*4 < h1->allocated) extend(h1, 0); /* shrink really */
+                FREETMPS;
+            }
+            LEAVE;
+        } else {
+            size_t i;
+
+            EXTEND(SP, h1->used);
+            if (!h1->has_values) EXTEND_MORTAL(h1->used);
+
+            PUSHMARK(SP);
+            PUSHs(heap2);
+            for (i=1; i<h1->used; i++) {
+                if (h1->has_values) value = h1->values[i];
+                else {
+                    if (h1->order == LESS)
+                        value = newSVnv(FKEY(NV, h1, i));
+                    else if (h1->order == MORE)
+                        value = newSVnv(-FKEY(NV, h1, i));
+                    else croak("No fast %s order", order_name(h1));
+                    sv_2mortal(value);
+                }
+                PUSHs(value);
+            }
+            PUTBACK;
             count = call_method("insert", G_VOID);
-
             SPAGAIN;
             if (count) {
                 if (count < 0) croak("Forced void context call 'insert' succeeded in returning %d values. This is impossible", (int) count);
                 SP -= count;
             }
-            h1->used--;
-            if (h1->has_values) SvREFCNT_dec(value);
-            if (h1->wrapped && !h1->fast) SvREFCNT_dec(h1->keys[h1->used]);
-            if ((h1->used+4)*4 < h1->allocated) extend(h1); /* shrink really */
-            FREETMPS;
+            while (h1->used > 1) {
+                h1->used--;
+                if (h1->has_values) SvREFCNT_dec(h1->values[h1->used]);
+                if (h1->wrapped && !h1->fast) SvREFCNT_dec(h1->keys[h1->used]);
+            }
+            if ((h1->used+4)*4 < h1->allocated) extend(h1, 0); /* shrink really */
         }
-        LEAVE;
     }
 
 void
@@ -1252,16 +1841,18 @@ _key_absorb(SV * heap1, SV *heap2)
     int copied2;
     SV *heap1_ref, *key, *value;
     heap h1, h2;
+    int one_by_one;
   PPCODE:
     /* Helper for absorb, puts h1 into h2 */
     h1 = C_HEAP(heap1, "heap1");
     /* Keep arguments alive for the duration */
     heap1_ref = SvRV(heap1);
     sv_2mortal(SvREFCNT_inc(heap1_ref));
-    if (h1->used < 2) XSRETURN_EMPTY;
     if (h1->locked) croak("recursive heap change");
     SAVEINT(h1->locked);
     h1->locked = 1;
+
+    if (h1->used < 2) XSRETURN_EMPTY;
 
     if (MAGIC && SvMAGICAL(heap2)) {
         heap2 = MORTALCOPY(heap2);
@@ -1270,28 +1861,116 @@ _key_absorb(SV * heap1, SV *heap2)
     /* If we are an XS heap, the argument probably is too */
     h2 = TRY_C_HEAP(heap2);
     if (h2) {
+        size_t more, first;
+
         if (h1 == h2) croak("Self absorption");
         if (!h2->key_ops) croak("This heap type does not support key_insert");
+        PUTBACK;
 
         /* Keep arguments alive for the duration */
-        /* heap2 is now the object, not the object pointer */ 
+        /* heap2 is now the object, not the object pointer */
         if (!copied2) sv_2mortal(SvREFCNT_inc(heap2));
+        more = h1->used-1;
+        if (h2->used-1+more > h2->max_count)
+            more = h2->max_count-(h2->used-1);
+        if (more <= 1) one_by_one = 1;
+        else one_by_one = h2->can_die;
+        if (!one_by_one) {
+            SV *key;
 
-        if (h1->fast)        key   = sv_newmortal();
-        if (!h1->has_values) value = sv_newmortal();
+            if (h2->locked) croak("recursive heap change");
+            SAVEINT(h2->locked);
+            h2->locked = 1;
+
+            first = h2->used;
+            if (first+more > h2->allocated) extend(h2, more);
+
+            if (h2->fast) {
+                NV k;
+
+                while (more--) {
+                    if (!h1->fast) k = SvNV(KEY(h1, h1->used-1));
+                    else if (h1->order== LESS)
+                        k = FKEY(NV, h1, h1->used-1);
+                    else if (h1->order== MORE)
+                        k = -FKEY(NV, h1, h1->used-1);
+                    else croak("No fast %s order", order_name(h1));
+
+                    if      (h2->order == LESS) FKEY(NV, h2, h2->used-1) =  k;
+                    else if (h2->order == MORE) FKEY(NV, h2, h2->used-1) = -k;
+                    else croak("No fast %s order", order_name(h2));
+
+                    if (h2->has_values) {
+                        if (h1->has_values) value = h1->values[h1->used-1];
+                        else if (h1->order == LESS)
+                            value = newSVnv(FKEY(NV, h1, h1->used-1));
+                        else if (h1->order == MORE)
+                            value = newSVnv(-FKEY(NV, h1, h1->used-1));
+                        else croak("No fast %s order", order_name(h1));
+                        h2->values[h2->used] = value;
+                    } else if (h1->has_values)
+                        SvREFCNT_dec(h1->values[h1->used-1]);
+
+                    h2->used++;
+                    h1->used--;
+
+                    if (h1->wrapped && !h1->fast) SvREFCNT_dec(h1->keys[h1->used]);
+                    if ((h1->used+4)*4 < h1->allocated) extend(h1, 0); /* shrink really */
+                }
+            } else {
+                while (more--) {
+                    if (h1->has_values)
+                        value = h1->values[h1->used-1];
+                    else if (h1->order == LESS)
+                        value = newSVnv(FKEY(NV, h1, h1->used-1));
+                    else if (h1->order == MORE)
+                        value = newSVnv(-FKEY(NV, h1, h1->used-1));
+                    else croak("No fast %s order", order_name(h1));
+
+                    if (!h1->fast) {
+                        key = KEY(h1, h1->used-1);
+                        if (!h1->wrapped) SvREFCNT_inc(key);
+                    } else if (h1->order== LESS)
+                        key = newSVnv(FKEY(NV, h1, h1->used-1));
+                    else if (h1->order== MORE)
+                        key = newSVnv(-FKEY(NV, h1, h1->used-1));
+                    else croak("No fast %s order", order_name(h1));
+
+                    h2->keys  [h2->used] = key;
+                    h2->values[h2->used] = value;
+                    h2->used++;
+                    h1->used--;
+                }
+            }
+
+            /* Reverse so that low elements are more likely to be on top
+               Only makes sense if the orders are likely to be the same.
+               It also depends on how a key is gets derived from a value,
+               so we just use the order attribute as heuristic
+            */
+            if (h1->order == h2->order) reverse(h2, first, h2->used-1);
+
+            h2->locked = 0;
+            multi_insert(aTHX_ h2, first);
+        }
+
+        if (h1->used >= 2) {
+            if (h1->fast)        key   = sv_newmortal();
+            if (!h1->has_values) value = sv_newmortal();
+        }
         while (h1->used >= 2) {
             SAVETMPS;
             if (h1->has_values) value = h1->values[h1->used-1];
-            else if (h1->order == LESS) 
+            else if (h1->order == LESS)
                 sv_setnv(value, FKEY(NV, h1, h1->used-1));
-            else if (h1->order == MORE) 
+            else if (h1->order == MORE)
                 sv_setnv(value, -FKEY(NV, h1, h1->used-1));
             else croak("No fast %s order", order_name(h1));
 
             if (!h1->fast) key = KEY(h1, h1->used-1);
-            else if (h1->order== LESS) 
+            else if (h1->order== LESS)
                 sv_setnv(key,  FKEY(NV, h1, h1->used-1));
-            else if (h1->order== MORE) 
+            else if (h1->order== MORE)
                 sv_setnv(key, -FKEY(NV, h1, h1->used-1));
             else croak("No fast %s order", order_name(h1));
 
@@ -1300,7 +1979,7 @@ _key_absorb(SV * heap1, SV *heap2)
             h1->used--;
             if (h1->has_values) SvREFCNT_dec(value);
             if (h1->wrapped && !h1->fast) SvREFCNT_dec(h1->keys[h1->used]);
-            if ((h1->used+4)*4 < h1->allocated) extend(h1); /* shrink really */
+            if ((h1->used+4)*4 < h1->allocated) extend(h1, 0); /* shrink really */
             FREETMPS;
         }
     } else if (!SvOK(heap2)) croak("heap2 is undefined");
@@ -1308,86 +1987,154 @@ _key_absorb(SV * heap1, SV *heap2)
     else {
         I32 count;
 
-        ENTER;
-        /* We will push up to three arguments */
-        EXTEND(SP, 3);
         /* Simple way to keep the refcount up at both levels */
         if (!copied2) heap2 = MORTALCOPY(heap2);
-
-        if (h1->fast)        key   = sv_newmortal();
-        if (!h1->has_values) value = sv_newmortal();
-        while (h1->used >= 2) {
-            SAVETMPS;
-            if (h1->has_values) value = h1->values[h1->used-1];
-            else if (h1->order == LESS) 
-                sv_setnv(value,  FKEY(NV, h1, h1->used-1));
-            else if (h1->order == MORE) 
-                sv_setnv(value, -FKEY(NV, h1, h1->used-1));
-            else croak("No fast %s order", order_name(h1));
-
-            if (!h1->fast) key = KEY(h1, h1->used-1);
-            else if (h1->order== LESS) 
-                sv_setnv(key,  FKEY(NV, h1, h1->used-1));
-            else if (h1->order== MORE) 
-                sv_setnv(key, -FKEY(NV, h1, h1->used-1));
-            else croak("No fast %s order", order_name(h1));
-
+        if (h1->used <= 2) one_by_one = 1;
+        else {
             PUSHMARK(SP);
             PUSHs(heap2);
-            PUSHs(key);
-            PUSHs(value);
             PUTBACK;
+            count = call_method("can_die", G_SCALAR);
+            if (count != 1) croak("Forced scalar context call succeeded in returning %d values. This is impossible", (int) count);
+            SPAGAIN;
+            value = POPs;
+            one_by_one = SvTRUE(value);
+        }
+        if (one_by_one) {
+            ENTER;
+            /* We will push up to three arguments */
+            EXTEND(SP, 3);
 
+            if (h1->fast)        key   = sv_newmortal();
+            if (!h1->has_values) value = sv_newmortal();
+            while (h1->used >= 2) {
+                SAVETMPS;
+                if (h1->has_values) value = h1->values[h1->used-1];
+                else if (h1->order == LESS)
+                    sv_setnv(value,  FKEY(NV, h1, h1->used-1));
+                else if (h1->order == MORE)
+                    sv_setnv(value, -FKEY(NV, h1, h1->used-1));
+                else croak("No fast %s order", order_name(h1));
+
+                if (!h1->fast) key = KEY(h1, h1->used-1);
+                else if (h1->order== LESS)
+                    sv_setnv(key,  FKEY(NV, h1, h1->used-1));
+                else if (h1->order== MORE)
+                    sv_setnv(key, -FKEY(NV, h1, h1->used-1));
+                else croak("No fast %s order", order_name(h1));
+
+                PUSHMARK(SP);
+                PUSHs(heap2);
+                PUSHs(key);
+                PUSHs(value);
+                PUTBACK;
+
+                count = call_method("key_insert", G_VOID);
+
+                SPAGAIN;
+                if (count) {
+                    if (count < 0) croak("Forced void context call 'key_insert' succeeded in returning %d values. This is impossible", (int) count);
+                    SP -= count;
+                }
+                h1->used--;
+                if (h1->has_values) SvREFCNT_dec(value);
+                if (h1->wrapped && !h1->fast) SvREFCNT_dec(h1->keys[h1->used]);
+                if ((h1->used+4)*4 < h1->allocated) extend(h1, 0); /* shrink really */
+                FREETMPS;
+            }
+            LEAVE;
+        } else {
+            size_t i;
+
+            EXTEND(SP, 2*h1->used-1);
+            i = 0;
+            if (h1->fast || !h1->wrapped) i += h1->used-1;
+            if (h1->has_values) i+= h1->used-1;
+            if (i) EXTEND_MORTAL(i);
+
+            /* Drain h1 only *after* calling key_insert in case h2 doesn't
+               actually support key_insert */
+            PUSHMARK(SP);
+            PUSHs(heap2);
+            for (i=1; i<h1->used; i++) {
+                if (!h1->fast) key = KEY(h1, i);
+                else {
+                    if (h1->order== LESS) key = newSVnv( FKEY(NV, h1, i));
+                    else if (h1->order== MORE) key = newSVnv(-FKEY(NV, h1, i));
+                    else croak("No fast %s order", order_name(h1));
+                    sv_2mortal(key);
+                }
+                PUSHs(key);
+
+                if (h1->has_values) value = h1->values[i];
+                else {
+                    if (h1->order == LESS)
+                        value = newSVnv(FKEY(NV, h1, i));
+                    else if (h1->order == MORE)
+                        value = newSVnv(-FKEY(NV, h1, i));
+                    else croak("No fast %s order", order_name(h1));
+                    sv_2mortal(value);
+                }
+                PUSHs(value);
+            }
+            PUTBACK;
             count = call_method("key_insert", G_VOID);
-
             SPAGAIN;
             if (count) {
                 if (count < 0) croak("Forced void context call 'key_insert' succeeded in returning %d values. This is impossible", (int) count);
                 SP -= count;
             }
-            h1->used--;
-            if (h1->has_values) SvREFCNT_dec(value);
-            if (h1->wrapped && !h1->fast) SvREFCNT_dec(h1->keys[h1->used]);
-            if ((h1->used+4)*4 < h1->allocated) extend(h1); /* shrink really */
-            FREETMPS;
+            while (h1->used > 1) {
+                if (h1->has_values) SvREFCNT_dec(h1->values[h1->used]);
+                if (h1->wrapped && !h1->fast) SvREFCNT_dec(KEY(h1, h1->used));
+                h1->used-1;
+            }
+            if ((h1->used+4)*4 < h1->allocated) extend(h1, 0); /* shrink really */
         }
-        LEAVE;
     }
 
 void
-absorb(SV *heap1, SV *heap2)
+absorb(SV *heap, ...)
   PREINIT:
-    I32 count;
-  PPCODE:
-    if (MAGIC && SvMAGICAL(heap2)) heap2 = MORTALCOPY(heap2);
-    PUSHMARK(SP);
-    PUSHs(heap2);
-    PUSHs(heap1);
-    PUTBACK;
-    count = call_method("_absorb", G_VOID);
-    /* Needed or the stack will remember and return the stuff we pushed */
-    SPAGAIN;
-    if (count) {
-        if (count < 0) croak("Forced void context call '_absorb' succeeded in returning %d values. This is impossible", (int) count);
-        SP -= count;
+    I32 count, i;
+    SV *heap2;
+  CODE:
+    for (i=1; i<items; i++) {
+        heap2 = ST(i);
+        if (MAGIC && SvMAGICAL(heap2)) heap2 = MORTALCOPY(heap2);
+        PUSHMARK(SP);
+        XPUSHs(heap2);
+        XPUSHs(heap);
+        PUTBACK;
+        count = call_method("_absorb", G_VOID);
+        /* Needed or the stack will remember and return the stuff we pushed */
+        SPAGAIN;
+        if (count) {
+            if (count < 0) croak("Forced void context call '_absorb' succeeded in returning %d values. This is impossible", (int) count);
+            SP -= count;
+        }
     }
 
 void
-key_absorb(SV *heap1, SV *heap2)
+key_absorb(SV *heap, ...)
   PREINIT:
-    I32 count;
-  PPCODE:
-    if (MAGIC && SvMAGICAL(heap2)) heap2 = MORTALCOPY(heap2);
-    PUSHMARK(SP);
-    PUSHs(heap2);
-    PUSHs(heap1);
-    PUTBACK;
-    count = call_method("_key_absorb", G_VOID);
-    /* Needed or the stack will remember and return the stuff we pushed */
-    SPAGAIN;
-    if (count) {
-        if (count < 0) croak("Forced void context call '_key_absorb' succeeded in returning %d values. This is impossible", (int) count);
-        SP -= count;
+    I32 count, i;
+    SV *heap2;
+  CODE:
+    for (i=1; i<items; i++) {
+        heap2 = ST(i);
+        if (MAGIC && SvMAGICAL(heap2)) heap2 = MORTALCOPY(heap2);
+        PUSHMARK(SP);
+        XPUSHs(heap2);
+        XPUSHs(heap);
+        PUTBACK;
+        count = call_method("_key_absorb", G_VOID);
+        /* Needed or the stack will remember and return the stuff we pushed */
+        SPAGAIN;
+        if (count) {
+            if (count < 0) croak("Forced void context call '_key_absorb' succeeded in returning %d values. This is impossible", (int) count);
+            SP -= count;
+        }
     }
 
 void
@@ -1502,15 +2249,438 @@ can_die(heap h)
 void
 max_count(heap h)
   PPCODE:
-    if (h->max_count == (UV) -1) XSRETURN_NV(INFINITY);
+    if (h->max_count == MAX_SIZE) XSRETURN_NV(INFINITY);
     XSRETURN_UV(h->max_count);
+
+void
+merge_arrays(heap h, ...)
+  PREINIT:
+    I32 i, j;
+    size_t l, filled, left, k0, k1, k2;
+    SV *value, **ptr, *key;
+    AV *av, *work_av;
+    merge *work_heap, here;
+    fast_merge *fast_work_heap, fast_here;
+  CODE:
+    filled = left = 0;
+    for (i=1; i<items; i++) {
+        value = ST(i);
+        if (MAGIC) SvGETMAGIC(value);
+        if (!SvROK(value))
+            croak("argument %u is not a reference", (unsigned int) i-1);
+
+        work_av = (AV*) SvRV(value);
+        if (MAGIC) SvGETMAGIC((SV *) work_av);
+        if (SvTYPE(work_av) != SVt_PVAV)
+            croak("argument %u is not an array reference", (unsigned int) i-1);
+        j = av_len(work_av);
+        if (j < 0) continue;
+        filled++;
+        left += j+1;
+        av = work_av;
+    }
+
+    work_av = newAV();
+    value = newRV_noinc((SV *) work_av);
+    ST(0) = sv_2mortal(value);
+    k2 = left;
+    if (h->max_count != MAX_SIZE && h->max_count < left)
+	left = h->max_count;
+    av_extend(work_av, (I32) left - 1);
+
+    switch(filled) {
+      case 0: break;
+      case 1:
+        for (k0= k2-left, k1=0; k1 < left; k0++, k1++) {
+            ptr = av_fetch(av, k0, 0);
+            if (ptr) {
+                value = newSVsv(*ptr);
+                if (!av_store(work_av, k1, value)) {
+                    SvREFCNT_dec(value);
+                    croak("Assertion: Could not store value");
+                }
+            }
+        }
+        break;
+      default:
+        if (h->fast) {
+            if (h->max_count < filled) {
+                filled = h->max_count;
+                New(__LINE__ % 1000, fast_work_heap, filled+1, struct fast_merge);
+                SAVEFREEPV(fast_work_heap);
+                k1 = 0;
+                for (i=1; i<items && k1 < filled; i++) {
+                    value = ST(i);
+                    if (!SvROK(value))
+                        croak("argument %u is not a reference (it was last time)",
+                              (unsigned int) i-1);
+
+                    av = (AV*) SvRV(value);
+                    if (SvTYPE(work_av) != SVt_PVAV)
+                        croak("argument %u is not an array reference (it was last time)", (unsigned int) i-1);
+                    j = av_len(av);
+                    if (j < 0) continue;
+                    ++k1;
+                    ptr = av_fetch(av, j, 0);
+                    key = fetch_key(aTHX_ h, ptr ? *ptr : &PL_sv_undef);
+                    if      (h->order == LESS)
+                        fast_work_heap[k1].key =  SvNV(key);
+                    else if (h->order == MORE)
+                        fast_work_heap[k1].key= -SvNV(key);
+                    else croak("No fast %s order", order_name(h));
+                    fast_work_heap[k1].array = av;
+                    fast_work_heap[k1].index = j;
+                }
+                if (k1 != filled)
+                    croak("Less than %"UVuf" non-empty array references in the second round", (UV) filled);
+
+                /* heapify, top is smallest */
+                for (k2 = filled/2; k2 > 0; k2--) {
+                    l = k2*2;
+                    fast_here = fast_work_heap[k2];
+                    while (l < filled) {
+                        if (fast_work_heap[l].key < fast_here.key) {
+                            if (fast_work_heap[l+1].key < fast_work_heap[l].key) l++;
+                        } else if (fast_work_heap[l+1].key < fast_here.key) l++;
+                        else break;
+                        fast_work_heap[l/2] = fast_work_heap[l];
+                        l *= 2;
+                    }
+                    if (l == filled && fast_work_heap[l].key < fast_here.key) {
+                        fast_work_heap[l/2] = fast_work_heap[l];
+                        l *= 2;
+                    }
+                    fast_work_heap[l/2] = fast_here;
+                }
+                for (; i<items; i++) {
+                    value = ST(i);
+                    if (!SvROK(value))
+                        croak("argument %u is not a reference (it was last time)",
+                              (unsigned int) i-1);
+
+                    av = (AV*) SvRV(value);
+                    if (SvTYPE(work_av) != SVt_PVAV)
+                        croak("argument %u is not an array reference (it was last time)", (unsigned int) i-1);
+                    j = av_len(av);
+                    if (j < 0) continue;
+                    ptr = av_fetch(av, j, 0);
+                    key = fetch_key(aTHX_ h, ptr ? *ptr : &PL_sv_undef);
+                    if      (h->order == LESS) fast_here.key =  SvNV(key);
+                    else if (h->order == MORE) fast_here.key = -SvNV(key);
+                    else croak("No fast %s order", order_name(h));
+                    if (fast_work_heap[1].key >= fast_here.key) continue;
+                    l = 2;
+                    while (l < filled) {
+                        if (fast_work_heap[l].key < fast_here.key) {
+                            if (fast_work_heap[l+1].key < fast_work_heap[l].key) l++;
+                        } else if (fast_work_heap[l+1].key < fast_here.key) l++;
+                        else break;
+                        fast_work_heap[l/2] = fast_work_heap[l];
+                        l *= 2;
+                    }
+                    if (l == filled && fast_work_heap[l].key < fast_here.key)
+                        fast_work_heap[l/2] = fast_work_heap[l];
+                    else l /= 2;
+                    fast_work_heap[l].key = fast_here.key;
+                    fast_work_heap[l].array = av;
+                    fast_work_heap[l].index = j;
+                }
+            } else {
+                New(__LINE__ % 1000, fast_work_heap, filled+1, struct fast_merge);
+                SAVEFREEPV(fast_work_heap);
+                k1 = 0;
+                for (i=1; i<items; i++) {
+                    value = ST(i);
+                    if (!SvROK(value))
+                        croak("argument %u is not a reference (it was last time)",
+                              (unsigned int) i-1);
+
+                    av = (AV*) SvRV(value);
+                    if (SvTYPE(work_av) != SVt_PVAV)
+                        croak("argument %u is not an array reference (it was last time)", (unsigned int) i-1);
+                    j = av_len(av);
+                    if (j < 0) continue;
+                    if (++k1 > filled)
+                        croak("More than %"UVuf" non-empty array references in the second round", (UV) filled);
+                    ptr = av_fetch(av, j, 0);
+                    key = fetch_key(aTHX_ h, ptr ? *ptr : &PL_sv_undef);
+                    if      (h->order == LESS) fast_work_heap[k1].key =  SvNV(key);
+                    else if (h->order == MORE) fast_work_heap[k1].key = -SvNV(key);
+                    else croak("No fast %s order", order_name(h));
+                    fast_work_heap[k1].array = av;
+                    fast_work_heap[k1].index = j;
+                }
+                if (k1 != filled)
+                    croak("Less than %"UVuf" non-empty array references in the second round", (UV) filled);
+            }
+
+            /* heapify */
+            for (k2 = filled/2; k2 > 0; k2--) {
+                l = k2*2;
+                fast_here = fast_work_heap[k2];
+                while (l < filled) {
+                    if (fast_here.key < fast_work_heap[l].key) {
+                        if (fast_work_heap[l].key < fast_work_heap[l+1].key) l++;
+                    } else if (fast_here.key < fast_work_heap[l+1].key) l++;
+                    else break;
+                    fast_work_heap[l/2] = fast_work_heap[l];
+                    l *= 2;
+                }
+                if (l == filled && fast_here.key < fast_work_heap[l].key) {
+                    fast_work_heap[l/2] = fast_work_heap[l];
+                    l *= 2;
+                }
+                fast_work_heap[l/2] = fast_here;
+            }
+
+            /* Start extracting */
+            while (1) {
+                j = fast_work_heap[1].index;
+                av = fast_work_heap[1].array;
+                ptr = av_fetch(av, j, 0);
+                if (ptr) {
+                    value = newSVsv(*ptr);
+                    --left;
+                    if (!av_store(work_av, left, value)) {
+                        SvREFCNT_dec(value);
+                        croak("Assertion: Could not store value");
+                    }
+                }
+                if (left == 0) break;
+                j--;
+                if (j >= 0) {
+                    ptr = av_fetch(av, j, 0);
+                    key = fetch_key(aTHX_ h, ptr ? *ptr : &PL_sv_undef);
+                    if      (h->order == LESS) fast_here.key =  SvNV(key);
+                    else if (h->order == MORE) fast_here.key = -SvNV(key);
+                    else croak("No fast %s order", order_name(h));
+                    fast_here.array = av;
+                    fast_here.index = j;
+                } else {
+                    fast_here = fast_work_heap[filled--];
+                    if (filled <= 1) {
+                        av = fast_here.array;
+                        for (j = fast_here.index; j >= 0; j--) {
+                            --left;
+                            ptr = av_fetch(av, j, 0);
+                            if (ptr) {
+                                value = newSVsv(*ptr);
+                                if (!av_store(work_av, left, value)) {
+                                    SvREFCNT_dec(value);
+                                    croak("Assertion: Could not store value");
+                                }
+                            }
+                            if (left == 0) break;
+                        }
+                        if (left) croak("Not enough values the second time round");
+                        break;
+                    }
+                }
+                l = 2;
+                while (l < filled) {
+                    if (fast_here.key < fast_work_heap[l].key) {
+                        if (fast_work_heap[l].key < fast_work_heap[l+1].key) l++;
+                    } else if (fast_here.key < fast_work_heap[l+1].key) l++;
+                    else break;
+                    fast_work_heap[l/2] = fast_work_heap[l];
+                    l *= 2;
+                }
+                if (l == filled && fast_here.key < fast_work_heap[l].key) {
+                    fast_work_heap[l/2] = fast_work_heap[l];
+                    l *= 2;
+                }
+                fast_work_heap[l/2] = fast_here;
+            }
+        } else {
+            if (h->max_count < filled) {
+                filled = h->max_count;
+                New(__LINE__ % 1000, work_heap, filled+1, struct merge);
+                SAVEFREEPV(work_heap);
+                k1 = 0;
+                for (i=1; i<items && k1 < filled; i++) {
+                    value = ST(i);
+                    if (!SvROK(value))
+                        croak("argument %u is not a reference (it was last time)",
+                              (unsigned int) i-1);
+
+                    av = (AV*) SvRV(value);
+                    if (SvTYPE(work_av) != SVt_PVAV)
+                        croak("argument %u is not an array reference (it was last time)", (unsigned int) i-1);
+                    j = av_len(av);
+                    if (j < 0) continue;
+                    ++k1;
+                    ptr = av_fetch(av, j, 0);
+                    work_heap[k1].key = fetch_key(aTHX_ h, ptr ? *ptr : &PL_sv_undef);
+                    work_heap[k1].array = av;
+                    work_heap[k1].index = j;
+                }
+                if (k1 != filled)
+                    croak("Less than %"UVuf" non-empty array references in the second round", (UV) filled);
+
+                /* heapify, top is smallest */
+                for (k2 = filled/2; k2 > 0; k2--) {
+                    l = k2*2;
+                    here = work_heap[k2];
+                    while (l < filled) {
+                        if (less(aTHX_ h, work_heap[l].key, here.key)) {
+                            if (less(aTHX_ h, work_heap[l+1].key, work_heap[l].key)) l++;
+                        } else if (less(aTHX_ h, work_heap[l+1].key, here.key)) l++;
+                        else break;
+                        work_heap[l/2] = work_heap[l];
+                        l *= 2;
+                    }
+                    if (l == filled && less(aTHX_ h, work_heap[l].key, here.key)) {
+                        work_heap[l/2] = work_heap[l];
+                        l *= 2;
+                    }
+                    work_heap[l/2] = here;
+                }
+                for (; i<items; i++) {
+                    value = ST(i);
+                    if (!SvROK(value))
+                        croak("argument %u is not a reference (it was last time)",
+                              (unsigned int) i-1);
+
+                    av = (AV*) SvRV(value);
+                    if (SvTYPE(work_av) != SVt_PVAV)
+                        croak("argument %u is not an array reference (it was last time)", (unsigned int) i-1);
+                    j = av_len(av);
+                    if (j < 0) continue;
+                    ptr = av_fetch(av, j, 0);
+                    here.key   = fetch_key(aTHX_ h, ptr ? *ptr : &PL_sv_undef);
+                    if (!less(aTHX_ h, work_heap[1].key, here.key)) continue;
+                    l = 2;
+                    while (l < filled) {
+                        if (less(aTHX_ h, work_heap[l].key, here.key)) {
+                            if (less(aTHX_ h, work_heap[l+1].key, work_heap[l].key)) l++;
+                        } else if (less(aTHX_ h, work_heap[l+1].key, here.key)) l++;
+                        else break;
+                        work_heap[l/2] = work_heap[l];
+                        l *= 2;
+                    }
+                    if (l == filled &&
+                        less(aTHX_ h, work_heap[l].key, here.key))
+                        work_heap[l/2] = work_heap[l];
+                    else l /= 2;
+                    work_heap[l].key = here.key;
+                    work_heap[l].array = av;
+                    work_heap[l].index = j;
+                }
+            } else {
+                New(__LINE__ % 1000, work_heap, filled+1, struct merge);
+                SAVEFREEPV(work_heap);
+                k1 = 0;
+                for (i=1; i<items; i++) {
+                    value = ST(i);
+                    if (!SvROK(value))
+                        croak("argument %u is not a reference (it was last time)",
+                              (unsigned int) i-1);
+
+                    av = (AV*) SvRV(value);
+                    if (SvTYPE(work_av) != SVt_PVAV)
+                        croak("argument %u is not an array reference (it was last time)", (unsigned int) i-1);
+                    j = av_len(av);
+                    if (j < 0) continue;
+                    if (++k1 > filled)
+                        croak("More than %"UVuf" non-empty array references in the second round", (UV) filled);
+                    ptr = av_fetch(av, j, 0);
+                    work_heap[k1].key   = fetch_key(aTHX_ h, ptr ? *ptr : &PL_sv_undef);
+                    work_heap[k1].array = av;
+                    work_heap[k1].index = j;
+                }
+                if (k1 != filled)
+                    croak("Less than %"UVuf" non-empty array references in the second round", (UV) filled);
+            }
+
+            /* heapify */
+            for (k2 = filled/2; k2 > 0; k2--) {
+                l = k2*2;
+                here = work_heap[k2];
+                while (l < filled) {
+                    if (less(aTHX_ h, here.key, work_heap[l].key)) {
+                        if (less(aTHX_ h, work_heap[l].key, work_heap[l+1].key)) l++;
+                    } else if (less(aTHX_ h, here.key, work_heap[l+1].key)) l++;
+                    else break;
+                    work_heap[l/2] = work_heap[l];
+                    l *= 2;
+                }
+                if (l == filled && less(aTHX_ h, here.key, work_heap[l].key)) {
+                    work_heap[l/2] = work_heap[l];
+                    l *= 2;
+                }
+                work_heap[l/2] = here;
+            }
+
+            /* Start extracting */
+            while (1) {
+                j = work_heap[1].index;
+                av = work_heap[1].array;
+                ptr = av_fetch(av, j, 0);
+                if (ptr) {
+                    value = newSVsv(*ptr);
+                    --left;
+                    if (!av_store(work_av, left, value)) {
+                        SvREFCNT_dec(value);
+                        croak("Assertion: Could not store value");
+                    }
+                }
+                if (left == 0) break;
+                j--;
+                if (j >= 0) {
+                    ptr = av_fetch(av, j, 0);
+                    here.key   = fetch_key(aTHX_ h, ptr ? *ptr : &PL_sv_undef);
+                    here.array = av;
+                    here.index = j;
+                } else {
+                    here = work_heap[filled--];
+                    if (filled <= 1) {
+                        av = here.array;
+                        for (j = here.index; j >= 0; j--) {
+                            --left;
+                            ptr = av_fetch(av, j, 0);
+                            if (ptr) {
+                                value = newSVsv(*ptr);
+                                if (!av_store(work_av, left, value)) {
+                                    SvREFCNT_dec(value);
+                                    croak("Assertion: Could not store value");
+                                }
+                            }
+                            if (left == 0) break;
+                        }
+                        if (left) croak("Not enough values the second time round");
+                        break;
+                    }
+                }
+                l = 2;
+                while (l < filled) {
+                    if (less(aTHX_ h, here.key, work_heap[l].key)) {
+                        if (less(aTHX_ h, work_heap[l].key, work_heap[l+1].key)) l++;
+                    } else if (less(aTHX_ h, here.key, work_heap[l+1].key)) l++;
+                    else break;
+                    work_heap[l/2] = work_heap[l];
+                    l *= 2;
+                }
+                if (l == filled && less(aTHX_ h, here.key, work_heap[l].key)) {
+                    work_heap[l/2] = work_heap[l];
+                    l *= 2;
+                }
+                work_heap[l/2] = here;
+            }
+        }
+        break;
+    }
+    XSRETURN(1);
 
 void
 DESTROY(heap h)
   PREINIT:
     SV *key, *value;
   PPCODE:
-    if (h->locked) warn("lock during DESTROY. Something is *deeply* wrong");
+    /* Let's assume the module isn't buggy and it always increases the refcount
+       on the heap during modification.
+       That means that the user is explicitely calling DESTROY */
+    if (h->locked)
+	croak("Refusing explicit DESTROY call during heap modification");
     h->locked = 1;
     if (h->fast || !h->wrapped) {
         if (h->has_values)
@@ -1547,3 +2717,6 @@ DESTROY(heap h)
     if (h->values) Safefree(h->values);
     if (h->keys)   Safefree(h->keys);
     Safefree(h);
+
+BOOT:
+    if (MAX_SIZE < 0) croak("signed size_t");

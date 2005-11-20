@@ -10,12 +10,19 @@ use Test::More "no_plan";
 use lib "t";
 use FakeHeap;
 
+my $wanted_implementor;
 BEGIN {
-    @Heap::Simple::implementors = qw(Heap::Simple::XS) unless
+    $wanted_implementor = "XS";
+    @Heap::Simple::implementors = ("Heap::Simple::$wanted_implementor") unless
         @Heap::Simple::implementors;
     use_ok("Heap::Simple");
 };
-is(Heap::Simple->implementation, "Heap::Simple::XS");
+my $class = Heap::Simple->implementation;
+if ($class ne "Heap::Simple::$wanted_implementor") {
+    diag("Was supposed to test Heap::Simple::$wanted_implementor but loaded $class");
+    fail("Wrong heap library got loaded");
+    exit 1;
+}
 
 my %order2infinity =
     (""  => 9**9**9,
@@ -31,7 +38,6 @@ sub wrap {
 }
 
 my ($fake, $val, $code);
-my $class = Heap::Simple->implementation;
 my $unicode = "utf8"->can("is_utf8");
 # diag("unicode=$unicode");
 
@@ -84,8 +90,7 @@ is($fake->max_count, 9**9**9);
 $fake = FakeHeap->new;
 is($fake->order, "<");
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 is($fake->extract_top, 9);
 is($fake->extract_top, 11);
 is($fake->extract_top, 100);
@@ -96,8 +101,7 @@ is($fake->order, "<");
 $fake = FakeHeap->new(order => ">");
 is($fake->order, ">");
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 is($fake->extract_top, 100);
 is($fake->extract_top, 11);
 is($fake->extract_top, 9);
@@ -106,8 +110,7 @@ is($fake->extract_top, 9);
 $fake = FakeHeap->new(order => "lt");
 is($fake->order, "lt");
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 is($fake->extract_top, "A100");
 is($fake->extract_top, "A11");
 is($fake->extract_top, "A9");
@@ -118,8 +121,7 @@ is($fake->order, "lt", "Case doesn't matter");
 $fake = FakeHeap->new(order => "gt");
 is($fake->order, "gt");
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 is($fake->extract_top, "A9");
 is($fake->extract_top, "A11");
 is($fake->extract_top, "A100");
@@ -133,8 +135,7 @@ $val = $fake->order;
 is($val, $code);
 isa_ok($val, "CODE");
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 is($fake->extract_top, 100);
 is($fake->extract_top, 11);
 is($fake->extract_top, 9);
@@ -150,8 +151,7 @@ $val->inc;
 ok(!$fake->wrapped, "Not wrapped");
 is(() = $fake->wrapped, 0, "wrapped is empty in list context");
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 is($fake->extract_top, 9);
 is($fake->extract_top, 11);
 is($fake->extract_top, 100);
@@ -181,8 +181,7 @@ is($fake->elements, "Array");
 is_deeply([$fake->elements], [Array => 0], "array defaults to index 0");
 ok(!$fake->wrapped, "Not wrapped");
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 $val = $fake->extract_top;
 isa_ok($val, "Canary");
 is_deeply($val, [9]);
@@ -208,8 +207,7 @@ is_deeply($val, [Hash => "foo"], "hash element");
 ok(!utf8::is_utf8($val->[1]), "index did not become unicode") if $unicode;
 ok(!$fake->wrapped, "Not wrapped");
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 $val = $fake->extract_top;
 isa_ok($val, "Canary");
 is_deeply($val, {"foo" => 9});
@@ -223,8 +221,7 @@ $val = [$fake->elements];
 is_deeply($val, [Hash => $evil_string], "hash element");
 ok(utf8::is_utf8($val->[1]), "index is unicode") if $unicode;
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 $val = $fake->extract_top;
 isa_ok($val, "Canary");
 is_deeply($val, {$evil_string => 9});
@@ -243,8 +240,7 @@ is_deeply($val, [Function => $code], "Code is preserved");
 isa_ok($val->[1], "CODE");
 ok(!$fake->wrapped, "Not wrapped");
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 $val = $fake->extract_top;
 is_deeply($val, [100]);
 isa_ok($val, "Canary");
@@ -267,8 +263,7 @@ $val = [$fake->elements];
 is_deeply($val, [Any => $code], "Code is preserved");
 isa_ok($val->[1], "CODE");
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 $val = $fake->extract_top;
 is_deeply($val, [100]);
 isa_ok($val, "Canary");
@@ -284,8 +279,7 @@ is($fake->elements, "Method");
 is_deeply([$fake->elements], [Method => "meth"], "method element");
 ok(!$fake->wrapped, "Not wrapped");
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 $val = $fake->extract_top;
 is_deeply($val, [100]);
 isa_ok($val, "Canary");
@@ -294,8 +288,7 @@ is_deeply($fake->extract_top, [9]);
 
 $fake = FakeHeap->new(elements => [Method => $evil_string]);
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 is_deeply($fake->extract_top, [9]);
 is($fake->top_key, 55);
 is_deeply($fake->extract_top, [11]);
@@ -313,8 +306,7 @@ $fake = FakeHeap->new(elements => [Object => "meth"]);
 is($fake->elements, "Object");
 is_deeply([$fake->elements], [Object => "meth"], "method element");
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 $val = $fake->extract_top;
 is_deeply($val, [100]);
 isa_ok($val, "Canary");
@@ -323,8 +315,7 @@ is_deeply($fake->extract_top, [9]);
 
 $fake = FakeHeap->new(elements => [Object => $evil_string]);
 $fake->insert(11);
-$fake->insert(100);
-$fake->insert(9);
+$fake->insert(100, 9);
 is_deeply($fake->extract_top, [9]);
 is($fake->top_key, 55);
 is_deeply($fake->extract_top, [11]);
@@ -353,7 +344,9 @@ for (0, 8) {
              [Any      => sub { return $order =~ /t/ ?
                                     "Z$_[0]->[0]" : -3 * shift->[0]}],
              [Method   => "meth"],
-             [Object   => "meth"]) {
+             [Method   => "-'\$f#"],
+             [Object   => "meth"],
+             [Object   => "-'\$f#"]) {
             $elements = $_;
             check($order ? (order => $order) : (),
                   $elements ? (elements => $elements) : (),
@@ -447,7 +440,7 @@ sub check {
 
     is($fake->infinity, $base_infinity, "proper infinity");
     is_deeply([$fake->infinity], [$base_infinity], "proper infinity");
-    $fake->insert($_) for qw(12 2 -12 0 13 -1 -2 1 12);
+    $fake->insert(qw(12 2 -12 0 13 -1 -2 1 12));
     is($fake->count, 9, "Count is number of inserts");
     () = $fake->count;
     $fake->values;
@@ -475,7 +468,10 @@ sub check {
     $fake->clear;
     is ($fake->count, 0, "Empty after clear");
     $fake->clear;
-    is ($fake->count, 0, "Double clearn works");
+    is ($fake->count, 0, "Double clear works");
+    $fake->insert(int rand 10) for 1..8;
+    () = $fake->extract_all;
+    is ($fake->count, 0, "Empty after extract_all");
 
     # Some tests on an empty heap
     die "Heap should have been empty" if $fake->count;
@@ -531,6 +527,7 @@ sub check {
 
     is(() = $fake->values, 0, "There are no values");
     is(() = $fake->keys,   0, "There are no keys");
+    is(() = $fake->extract_all, 0, "There are no values");
 
     # $fake should be empty at this point
     die "Heap should have been empty" if $fake->count;
@@ -636,7 +633,31 @@ sub check {
         is($fake->top_key, $order =~ /t/ ? "A-3" : -3);
         $fake->clear;
 
+        $fake->key_insert(map {-$_, $_} qw(12 2 -12 0 13 -1 -2 1 12));
+        is($fake->count, 9, "Have all new values");
+        @values = $fake->values;
+        @keys   = $fake->keys;
+        is_deeply($fake->top,     $values[0]);
+        is_deeply($fake->top_key, $keys[0]);
+        $fake->extract_top for 1..9;
+        is($fake->count, 0, "Empty again");
+        $fake->key_insert(-3, 8);
+        is($fake->top_key, $order =~ /t/ ? "A-3" : -3);
+        $fake->clear;
+
         $fake->_key_insert([-$_, $_]) for qw(12 2 -12 0 13 -1 -2 1 12);
+        is($fake->count, 9, "Have all new values");
+        @values = $fake->values;
+        @keys   = $fake->keys;
+        is_deeply($fake->top,     $values[0]);
+        is_deeply($fake->top_key, $keys[0]);
+        $fake->extract_top for 1..9;
+        is($fake->count, 0, "Empty again");
+        $fake->_key_insert([-3, 8]);
+        is($fake->top_key, $order =~ /t/ ? "A-3" : -3);
+        $fake->clear;
+
+        $fake->_key_insert(map [-$_, $_], qw(12 2 -12 0 13 -1 -2 1 12));
         is($fake->count, 9, "Have all new values");
         @values = $fake->values;
         @keys   = $fake->keys;
@@ -725,20 +746,28 @@ sub check {
     is_deeply(\@values, [["iiii"]], "min_key on empty heap returns set infinity, even in list context");
     isa_ok($values[0], "Canary");
 
+    # merge_array
+    $fake->merge_arrays([1, 2], [3, 4], [5, 6]);
+    $fake->merge_arrays([1, 2, 5], [3, 4, 6]);
+    $fake->merge_arrays();
+    $fake->merge_arrays([1, 2, 3, 4, 5, 6, 7]);
+    $fake->merge_arrays([], [1, 2, 3, 4, 5, 6, 7]);
+    $fake->merge_arrays(map [map int rand 10, 1..rand 10], 1..rand 6);
+
     # Some major inserts and deletes
     $fake->insert(rand) for 1..100;
     $fake->extract_top for 1..50;
-    $fake->insert(rand) for 1..100;
+    $fake->insert(map rand, 1..100);
     if ($wrapped) {
         $fake->extract_top for 1..150;
         $fake->key_insert(rand, rand) for 1..100;
         $fake->extract_top for 1..50;
-        $fake->key_insert(rand, rand) for 1..100;
+        $fake->key_insert(map {rand, rand} 1..100);
 
         $fake->extract_top for 1..150;
         $fake->_key_insert([rand, rand]) for 1..100;
         $fake->extract_top for 1..50;
-        $fake->_key_insert([rand, rand]) for 1..100;
+        $fake->_key_insert(map [rand, rand], 1..100);
     }
 
     if ($class ne "Heap::Simple::Perl") {
@@ -768,20 +797,23 @@ sub check {
     }
 
     my $fake1 = FakeHeap->new(@options,
-                              max_count => 7);
+                              max_count => 9);
     $fake1->insert($_) for 9, -3, 2, 7;
     my $fake2 = FakeHeap->new(@options);
-    $fake2->insert($_) for 6, 3, 8, -1;
-    $fake1->absorb($fake2);
+    $fake2->insert(6, 3, 8, -1);
+    my $fake3 = FakeHeap->new(@options);
+    $fake3->insert($_) for 14, 12, -7, 3;
+    $fake1->absorb($fake2, $fake3);
     is($fake2->count, 0);
-    is($fake1->count, 7);
+    is($fake3->count, 0);
+    is($fake1->count, 9);
     eval {
         my $heap = $fake1->heap;
         $heap->absorb($heap);
     };
     ok($@ =~ /^Self absorption at /, "proper error message: $@");
 
-    my $fake3 = FakeHeap->new();
+    $fake3 = FakeHeap->new();
     eval { $fake1->_key_absorb($fake3) };
     ok($@ =~ /^This heap type does not support _?key_insert at /,
        "Proper error message: $@");
@@ -790,7 +822,7 @@ sub check {
     if ($wrapped) {
         $fake2->key_absorb($fake1);
         is($fake1->count, 0);
-        is($fake2->count, 7);
+        is($fake2->count, 9);
     } else {
         my $heap = Heap::Simple->new(order => $order, elements => "Any");
         $heap->key_insert(5, 8);
@@ -799,12 +831,12 @@ sub check {
            "proper error message: $@");
         $heap->key_absorb($fake1);
         is($fake1->count, 0);
-        is($heap->count, 8);
+        is($heap->count, 10);
     }
     $fake1 = FakeHeap->new(@options, max_count => 7);
     $fake1->insert($_) for 9, -3, 2, 7;
     $fake2 = FakeHeap->new(@options);
-    $fake2->insert($_) for 6, 3, 8, -1;
+    $fake2->insert(6, 3, 8, -1);
     $fake1->heap->absorb($fake2->heap);
     is($fake1->heap->count, 7);
     is($fake2->heap->count, 0);
@@ -812,7 +844,7 @@ sub check {
         $fake1 = FakeHeap->new(@options, max_count => 7);
         $fake1->key_insert(-$_, $_) for 9, -3, 2, 7;
         $fake2 = FakeHeap->new(@options);
-        $fake2->key_insert(-$_, $_) for 6, 3, 8, -1;
+        $fake2->key_insert(map {-$_, $_} 6, 3, 8, -1);
         $fake1->heap->key_absorb($fake2->heap);
         is($fake1->heap->count, 7);
         is($fake2->heap->count, 0);
@@ -836,8 +868,42 @@ sub check {
     is($fake->count, 2);
     @values = $fake->values;
     is(@values, 2);
-    $fake->insert($_) for qw(12 2);
+    $fake->insert(qw(12 2));
     is($fake->count, 3);
+
+    # merge_array
+    $fake->merge_arrays([1, 2], [3, 4], [5, 6]);
+    $fake->merge_arrays([1, 2, 5], [3, 4, 6]);
+    $fake->merge_arrays();
+    $fake->merge_arrays([1, 2, 3, 4, 5, 6, 7]);
+    $fake->merge_arrays([], [1, 2, 3, 4, 5, 6, 7]);
+    $fake->merge_arrays(map [map int rand 10, 1..rand 10], 1..rand 6);
+
+    $fake = FakeHeap->new(@options,
+                          max_count => 4);
+    $fake->insert(-12, 8);
+    () = $fake->keys;
+    () = $fake->values;
+    $fake->insert(-13, 1, 9, -14, 6, 10, -15, 7, 11);
+    () = $fake->keys;
+    () = $fake->values;
+    if ($wrapped) {
+        $fake->clear;
+        $fake2->key_insert(map {-$_, $_} -12, 8);
+        () = $fake->keys;
+        () = $fake->values;
+        $fake->key_insert(map {-$_, $_} -13, 1, 9, -14, 6, 10, -15, 7, 11);
+        () = $fake->keys;
+        () = $fake->values;
+
+        $fake->clear;
+        $fake2->_key_insert(map [-$_, $_], -12, 8);
+        () = $fake->keys;
+        () = $fake->values;
+        $fake->_key_insert(map [-$_, $_], -13, 1, 9, -14, 6, 10, -15, 7, 11);
+        () = $fake->keys;
+        () = $fake->values;
+    }
 
     $fake->insert(-12);
     # $fake should be non-empty at this point so we test values cleanup too
@@ -929,7 +995,7 @@ sub check_keyed {
     is($fake->count, 2);
     @values = $fake->values;
     is(@values, 2);
-    $fake->key_insert(-$_, $_) for qw(12 2);
+    $fake->key_insert(map {-$_, $_} qw(12 2));
     is($fake->count, 3);
 
     $fake->clear;
@@ -946,7 +1012,7 @@ sub check_keyed {
     is($fake->count, 2);
     @values = $fake->values;
     is(@values, 2);
-    $fake->_key_insert([-$_, $_]) for qw(12 2);
+    $fake->_key_insert(map [-$_, $_], qw(12 2));
     is($fake->count, 3);
 
     $fake->clear;

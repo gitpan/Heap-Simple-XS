@@ -10,14 +10,19 @@ use Test::More "no_plan";
 use lib "t";
 use Ties;
 
+my $wanted_implementor;
 BEGIN {
-    @Heap::Simple::implementors = qw(Heap::Simple::XS) unless
+    $wanted_implementor = "XS";
+    @Heap::Simple::implementors = ("Heap::Simple::$wanted_implementor") unless
         @Heap::Simple::implementors;
     use_ok("Heap::Simple");
 };
-is(Heap::Simple->implementation, "Heap::Simple::XS");
-
 my $class = Heap::Simple->implementation;
+if ($class ne "Heap::Simple::$wanted_implementor") {
+    diag("Was supposed to test Heap::Simple::$wanted_implementor but loaded $class");
+    fail("Wrong heap library got loaded");
+    exit 1;
+}
 
 # Magic access on new
 my ($heap, $val, $scalar, @array, @elements, %hash, $fun);
@@ -94,7 +99,7 @@ tie @array, "Atie", $heap, \%hash;
 Atie->fetches;
 Htie->fetches;
 $fun->(@array);
-is(Atie->fetches, 2);
+is(Atie->fetches, $class eq "Heap::Simple::Perl" ? 3 : 2);
 if ($class eq "Heap::Simple::Perl") {
     is(Htie->fetches, 1, "Access the key even for empty insert");
     for ($heap->top_key) {

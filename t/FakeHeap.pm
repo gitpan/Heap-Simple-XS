@@ -23,22 +23,28 @@ sub meth {
     return -shift->[0];
 }
 
+*{"-'\$f#"} = sub {
+    return -shift->[0];
+};
+
 package FakeHeap;
 use strict;
 use warnings;	# Remove this for production. Assumes perl 5.6
 use Carp;
+use Data::Dumper;
+$Data::Dumper::Indent = 1;
 
 use vars qw($VERSION);
-$VERSION = "0.01";
+$VERSION = "0.02";
 
-my %order2code = 
+my %order2code =
     ("<"  => sub { shift() <  shift },
      ">"  => sub { shift() >  shift },
      "lt" => sub { shift() lt shift },
      "gt" => sub { shift() gt shift },
      );
 
-my %order2prefix = 
+my %order2prefix =
     ("lt" => "A",
      "gt" => "A");
 
@@ -59,14 +65,14 @@ sub new {
         index	  => $elements->[1],
         num_order => $order !~ /t/,
         dirty	  => $options{dirty},
-        less      => ref $order ? $order : $order2code{lc($order)} || 
+        less      => ref $order ? $order : $order2code{lc($order)} ||
             croak "Unhandled order '$order'",
     }, $class;
     my $t = $fake->{heap}->order;
     $order = lc($order) if !ref $order;
     $order eq $t || croak "Order is $t, but I expected $order";
     my @t = $fake->{heap}->elements;
-    $fake->{elements} eq $t[0] || 
+    $fake->{elements} eq $t[0] ||
         croak "Element type is @t, but I expected $fake->{elements}";
     return $fake;
 }
@@ -86,7 +92,7 @@ sub _make_element {
         $canaries++;
         return bless {$fake->{index} || croak("No index")=> $value }, "Canary";
     }
-    if ($type eq "Function" || $type eq "Any" || 
+    if ($type eq "Function" || $type eq "Any" ||
         $type eq "Method" || $type eq "Object") {
         return Canary->new($value);
     }
@@ -103,15 +109,15 @@ sub _find_top_value {
         push @pos, $i if $_->{value} eq $top;
         $i++;
     }
-    croak "Extracted value $top should not have been in the heap" if @pos == 0;
+    croak "Extracted value '$top' should not have been in the heap" if @pos == 0;
     my $pos = shift @pos;
     for (@pos) {
-        $pos = $_ if 
+        $pos = $_ if
             $less->($fake->{data}[$_]{key}, $fake->{data}[$pos]{key});
     }
     my $key = $fake->{data}[$pos]{key};
     for (@{$fake->{data}}) {
-        croak "$_->{key}, not $key should have been the top key" if 
+        croak "'$_->{key}', not '$key' should have been the top key" if
             $less->($_->{key}, $key);
     }
     return $pos;
@@ -124,67 +130,84 @@ sub _find_lowest_key {
     my @pos = 0..$#{$fake->{data}};
     my $pos = 0;
     for (@pos) {
-        $pos = $_ if 
+        $pos = $_ if
             $less->($fake->{data}[$_]{key}, $fake->{data}[$pos]{key});
     }
     return $pos;
 }
 
 sub insert {
-    my ($fake, $value) = @_;
-    $value = $fake->_make_element($value);
-    $fake->{heap}->insert($value);
-    my $key = $fake->{heap}->key($value);
-    if (@{$fake->{data}} == $fake->{max_count}) {
-        return unless @{$fake->{data}};
-        my $less = $fake->{less};
-        my $pos = $fake->_find_lowest_key;
-        return unless $less->($fake->{data}[$pos]{key}, $key);
-        splice(@{$fake->{data}}, $pos, 1);
+    my $fake = shift;
+    my @values = map $fake->_make_element($_), @_;
+    $fake->{heap}->insert(@values);
+    for my $value (@values) {
+        my $key = $fake->{heap}->key($value);
+        if (@{$fake->{data}} == $fake->{max_count}) {
+            next unless @{$fake->{data}};
+            my $less = $fake->{less};
+            my $pos = $fake->_find_lowest_key;
+            next unless $less->($fake->{data}[$pos]{key}, $key);
+            splice(@{$fake->{data}}, $pos, 1);
+        }
+        push @{$fake->{data}}, {
+            key   => $key,
+            value => $value,
+        };
     }
-    push @{$fake->{data}}, {
-        key   => $key, 
-        value => $value,
-    };
 }
 
 sub key_insert {
-    my ($fake, $key, $value) = @_;
-    $value = $fake->_make_element($value);
-    $key = $fake->{prefix} . $key if $fake->{prefix};
-    $fake->{heap}->key_insert($key, $value);
-    if (@{$fake->{data}} == $fake->{max_count}) {
-        return unless @{$fake->{data}};
-        my $less = $fake->{less};
-        my $pos = $fake->_find_lowest_key;
-        return unless $less->($fake->{data}[$pos]{key}, $key);
-        splice(@{$fake->{data}}, $pos, 1);
+    my $fake = shift;
+    my @args;
+    while (@_) {
+        my $key	  = shift;
+        $key = $fake->{prefix} . $key if $fake->{prefix};
+        my $value = $fake->_make_element(shift);
+        push @args, $key, $value;
     }
-    push @{$fake->{data}}, {
-        key   => $key,
-        value => $value};
+    $fake->{heap}->key_insert(@args);
+    while (@args) {
+        my $key   = shift @args;
+        my $value = shift @args;
+        if (@{$fake->{data}} == $fake->{max_count}) {
+            next unless @{$fake->{data}};
+            my $less = $fake->{less};
+            my $pos = $fake->_find_lowest_key;
+            next unless $less->($fake->{data}[$pos]{key}, $key);
+            splice(@{$fake->{data}}, $pos, 1);
+        }
+        push @{$fake->{data}}, {
+            key   => $key,
+            value => $value};
+    }
 }
 
 sub _key_insert {
-    my ($fake, $element) = @_;
-    my $value = $fake->_make_element($element->[1]);
-    my $key = 
-        $fake->{prefix} ? $fake->{prefix} . $element->[0] : $element->[0];
-    {
+    my $fake = shift;
+    my (@values, @args);
+    for my $element (@_) {
+        my $value = $fake->_make_element($element->[1]);
+        my $key =
+            $fake->{prefix} ? $fake->{prefix} . $element->[0] : $element->[0];
+        # Can't use local her since the arrayref itself gets inserted
         $element->[0] = $key;
         $element->[1] = $value;
-        $fake->{heap}->_key_insert($element);
     }
-    if (@{$fake->{data}} == $fake->{max_count}) {
-        return unless @{$fake->{data}};
-        my $less = $fake->{less};
-        my $pos = $fake->_find_lowest_key;
-        return unless $less->($fake->{data}[$pos]{key}, $key);
-        splice(@{$fake->{data}}, $pos, 1);
+    $fake->{heap}->_key_insert(@_);
+    for my $element (@_) {
+        my $key   = $element->[0];
+        my $value = $element->[1];
+        if (@{$fake->{data}} == $fake->{max_count}) {
+            next unless @{$fake->{data}};
+            my $less = $fake->{less};
+            my $pos = $fake->_find_lowest_key;
+            next unless $less->($fake->{data}[$pos]{key}, $key);
+            splice(@{$fake->{data}}, $pos, 1);
+        }
+        push @{$fake->{data}}, {
+            key   => $key,
+            value => $value};
     }
-    push @{$fake->{data}}, {
-        key   => $key,
-        value => $value};
 }
 
 sub count {
@@ -192,7 +215,7 @@ sub count {
     my $n2 = @{$fake->{data}};
     if (wantarray) {
         my @n1 = $fake->{heap}->count;
-        croak "$fake->{heap} real count didn't return exactly 1 value" if 
+        croak "$fake->{heap} real count didn't return exactly 1 value" if
             @n1 != 1;
         croak "$fake->{heap} real count $n1[0], expected $n2" if $n2 != $n1[0];
     } else {
@@ -207,7 +230,7 @@ sub extract_top {
     my $top;
     if (wantarray) {
         my @top = eval { $fake->{heap}->extract_top };
-        carp "$fake->{heap} extract_top returned not exactly one value" if 
+        carp "$fake->{heap} extract_top returned not exactly one value" if
             @top != 1 && !$@;
         $top = $top[0];
     } else {
@@ -229,7 +252,7 @@ sub extract_min {
     my $top;
     if (wantarray) {
         my @top = eval { $fake->{heap}->extract_min };
-        carp "$fake->{heap} extract_min returned not exactly one value" if 
+        carp "$fake->{heap} extract_min returned not exactly one value" if
             @top != 1 && !$@;
         $top = $top[0];
     } else {
@@ -252,10 +275,10 @@ sub extract_first {
     if (wantarray) {
         my @top = $fake->{heap}->extract_first;
         if (@{$fake->{data}}) {
-            carp "$fake->{heap} extract_first returned not exactly one value" 
+            carp "$fake->{heap} extract_first returned not exactly one value"
                 if @top != 1;
         } else {
-            carp "$fake->{heap} extract_first did not return zero values" 
+            carp "$fake->{heap} extract_first did not return zero values"
                 if @top;
         }
         $top = $top[0];
@@ -284,24 +307,53 @@ sub extract_upto {
     my $limit = shift;
     my $less = $fake->{less};
     for my $top (@top) {
-        @{$fake->{data}} || croak "Extracted value $top that should not exist";
+        @{$fake->{data}} || croak "Extracted value '$top' that should not exist";
         my $key = $fake->{heap}->key($top);
         my $i = 0;
         my $pos;
         for (@{$fake->{data}}) {
-            croak "$_->{key}, not $key should have been the next key" if 
+            croak "'$_->{key}', not '$key' should have been the next key" if
                 $less->($_->{key}, $key);
             $pos = $i if $_->{value} eq $top;
             $i++;
         }
-        defined $pos || 
-            croak "Extracted value $top should not have been in the heap";
+        defined $pos ||
+            croak "Extracted value '$top' should not have been in the heap";
         splice(@{$fake->{data}}, $pos, 1);
     }
     for (@{$fake->{data}}) {
-        croak "$_->{value} should have been returned too" if 
+        croak "'$_->{value}' should have been returned too" if
             !$less->($limit, $_->{key});
     }
+    return wantarray ? @top : $top[0];
+}
+
+sub extract_all {
+    my $fake = shift;
+    my @top;
+    if (wantarray) {
+        @top = $fake->{heap}->extract_all(@_);
+    } else {
+        croak "extract_all in list context is not specified";
+        @top = scalar $fake->{heap}->extract_all(@_);
+    }
+    my $less = $fake->{less};
+    for my $top (@top) {
+        @{$fake->{data}} || croak "Extracted value '$top' that should not exist";
+        my $key = $fake->{heap}->key($top);
+        my $i = 0;
+        my $pos;
+        for (@{$fake->{data}}) {
+            croak "'$_->{key}', not '$key' should have been the next key" if
+                $less->($_->{key}, $key);
+            $pos = $i if $_->{value} eq $top;
+            $i++;
+        }
+        defined $pos ||
+            croak "Extracted value '$top' should not have been in the heap";
+        splice(@{$fake->{data}}, $pos, 1);
+    }
+    croak "Heap should have been empty" if @{$fake->{data}};
     return wantarray ? @top : $top[0];
 }
 
@@ -310,7 +362,7 @@ sub top {
     my $top;
     if (wantarray) {
         my @top = eval { $fake->{heap}->top };
-        carp "$fake->{heap} top returned not exactly one value" if 
+        carp "$fake->{heap} top returned not exactly one value" if
             @top != 1 && !$@;
         $top = $top[0];
     } else {
@@ -334,10 +386,10 @@ sub first {
         if (@top == 0) {
             croak "Got no first value on non-empty heap" if @{$fake->{data}};
             return;
-        }         
+        }
         croak "Got multiple values from first" if @top != 1;
         $top = $top[0];
-        croak "Got first value on empty heap" if 
+        croak "Got first value on empty heap" if
             !@{$fake->{data}} && defined $top;
     } else {
         $top = eval { $fake->{heap}->first };
@@ -371,18 +423,18 @@ sub top_key {
         my $pos;
         my $numeric = $fake->{num_order} && $fake->{dirty};
         for (@{$fake->{data}}) {
-            croak "$_->{key}, not $key should have been the top key" if 
+            croak "'$_->{key}', not '$key' should have been the top key" if
                 $less->($_->{key}, $key);
             $pos = $i if $numeric ? $_->{key} == $key : $_->{key} eq $key;
             $i++;
         }
-        defined $pos || 
+        defined $pos ||
             croak "Extracted key $top should not have been in the heap";
     } else {
         my $err = $@;
         if (defined(my $inf = $fake->{heap}->infinity)) {
-            $top eq $inf || 
-                croak "Should have gotten infinity $inf, but got $top";
+            $top eq $inf ||
+                croak "Should have gotten infinity '$inf', but got '$top'";
             $n == 1 || croak "top_key should have returned one value";
         } elsif ($err) {
             die $err;
@@ -412,18 +464,18 @@ sub min_key {
         my $pos;
         my $numeric = $fake->{num_order} && $fake->{dirty};
         for (@{$fake->{data}}) {
-            croak "$_->{key}, not $key should have been the top key" if 
+            croak "'$_->{key}', not '$key' should have been the top key" if
                 $less->($_->{key}, $key);
             $pos = $i if $numeric ? $_->{key} == $key : $_->{key} eq $key;
             $i++;
         }
-        defined $pos || 
+        defined $pos ||
             croak "Extracted key $top should not have been in the heap";
     } else {
         my $err = $@;
         if (defined(my $inf = $fake->{heap}->infinity)) {
-            $top eq $inf || 
-                croak "Should have gotten infinity $inf, but got $top";
+            $top eq $inf ||
+                croak "Should have gotten infinity '$inf', but got '$top'";
             $n == 1 || croak "min_key should have returned one value";
         } elsif ($err) {
             die $err;
@@ -443,10 +495,10 @@ sub first_key {
             croak "Got no first_key value on non-empty heap" if
                 @{$fake->{data}};
             return;
-        }         
+        }
         croak "Got multiple values from first_key" if @top != 1;
         $top = $top[0];
-        croak "Got first_key value on empty heap" if 
+        croak "Got first_key value on empty heap" if
             !@{$fake->{data}} && defined $top;
     } else {
         $top = eval { $fake->{heap}->first_key };
@@ -458,13 +510,13 @@ sub first_key {
         my $pos;
         my $numeric = $fake->{num_order} && $fake->{dirty};
         for (@{$fake->{data}}) {
-            croak "$_->{key}, not $key should have been the top key" if 
+            croak "'$_->{key}', not '$key' should have been the top key" if
                 $less->($_->{key}, $key);
             $pos = $i if $numeric ? $_->{key} == $key : $_->{key} eq $key;
             $i++;
         }
-        defined $pos || 
-            croak "Extracted key $top should not have been in the heap";
+        defined $pos ||
+            croak "Extracted key '$top' should not have been in the heap";
         return $top;
     } elsif (defined($top)) {
         croak "Got a defined first_key from an empty heap";
@@ -481,7 +533,7 @@ sub values {
     @fvalues == @svalues || croak "Number of returned values differ";
     for (@svalues) {
         my $n = shift @fvalues;
-        $n eq $_ || croak "values: Unexpected value, either $_ or $n";
+        $n eq $_ || croak "values: Unexpected value, either $_ or $n\nfake=", Dumper($fake), "Real heap values=", Dumper(\@values), "Giving up";
     }
     # No check for heap property. test suite will implicitely test it
     # when it checks compatibility of keys and values order
@@ -499,14 +551,11 @@ sub keys {
         @skeys = sort @keys;
         @fkeys = sort map $_->{key}, @{$fake->{data}};
     }
-    @skeys == @fkeys || croak "Number of returned keys differ";
+    @skeys == @fkeys || croak "Number of returned keys differ (real heap ", scalar @skeys, " versus control data ", scalar @fkeys, ")";
     for (@skeys) {
         my $n = shift @fkeys;
-        if ($fake->{num_order}  && $fake->{dirty}) {
-            $n == $_ || croak "keys: Unexpected numeric key, either $_ or $n";
-        } else {
-            $n eq $_ || croak "keys: Unexpected key, either $_ or $n";
-        }
+        ($fake->{num_order} && $fake->{dirty} ? $n == $_ : $n eq $_) ||
+            croak "values: Unexpected key, either $_ or $n\nfake=", Dumper($fake), "Real heap keys=", Dumper(\@keys), "Giving up";
     }
     # Check heap property
     my $less = $fake->{less};
@@ -574,7 +623,7 @@ sub key_method {
         $pos = eval { $fake->{heap}->key_method(@_) };
     }
     if ($@) {
-        die $@ if 
+        die $@ if
             $fake->{elements} ne "Method" && $fake->{elements} ne "Object";
         carp "key_method should not have died";
         croak "key_method should not have died";
@@ -597,23 +646,23 @@ sub key_function {
         $pos = eval { $fake->{heap}->key_function(@_) };
     }
     if ($@) {
-        die $@ if 
+        die $@ if
             $fake->{elements} ne "Function" && $fake->{elements} ne "Any";
         carp "key_function should not have died";
         croak "key_function should not have died";
     }
     croak "key_function should have died" if
             $fake->{elements} ne "Function" && $fake->{elements} ne "Any";
-    $pos eq ($fake->{index} || 0) || 
+    $pos eq ($fake->{index} || 0) ||
         croak "key_function: Unexpected key function";
     return $pos;
 }
 
 sub absorb {
-    my ($fake1, $fake2) = @_;
-    my @k2 = $fake2->keys;
-    my @v2 = $fake2->values,
-    $fake1->{heap}->absorb($fake2);
+    my $fake1 = shift;
+    my @k2 = map $_->keys, @_;
+    my @v2 = map $_->values, @_;
+    $fake1->{heap}->absorb(@_);
     my $less = $fake1->{less};
     while (@v2) {
         my $value = shift @v2;
@@ -625,17 +674,17 @@ sub absorb {
             splice(@{$fake1->{data}}, $pos, 1);
         }
         push @{$fake1->{data}}, {
-            key   => $key, 
+            key   => $key,
             value => $value,
         };
     }
 }
 
 sub key_absorb {
-    my ($fake1, $fake2) = @_;
-    my @k2 = $fake2->keys;
-    my @v2 = $fake2->values,
-    $fake1->{heap}->key_absorb($fake2);
+    my $fake1 = shift;
+    my @k2 = map $_->keys, @_;
+    my @v2 = map $_->values, @_;
+    $fake1->{heap}->key_absorb(@_);
     my $less = $fake1->{less};
     while (@v2) {
         my $value = shift @v2;
@@ -647,9 +696,47 @@ sub key_absorb {
             splice(@{$fake1->{data}}, $pos, 1);
         }
         push @{$fake1->{data}}, {
-            key   => $key, 
+            key   => $key,
             value => $value,
         };
+    }
+}
+
+sub merge_arrays {
+    my $fake = shift;
+    my $less = $fake->{less};
+    my @values = map [map $_->[1], sort {$less->($a->[0], $b->[0]) ? -1 : 1} map {
+        my $element = $fake->_make_element($_);
+        [$fake->{heap}->key($element), $element];
+    } @$_], @_;
+    my $out = $fake->{heap}->merge_arrays(@values);
+    ref $out eq "ARRAY" || die "Expected an array reference, not '$out'";
+    my @list = map {map { key => $fake->{heap}->key($_), value => $_}, @$_ } @values;
+    if (@list > $fake->{max_count}) {
+        @$out == $fake->{max_count} ||
+            croak("$fake->{heap}: Unexpected number of values (" . @list .
+                  " value in, " .
+                  @$out . " values out, but max is " . $fake->{max_count}.")");
+    } else {
+        @$out == @list ||
+            croak("$fake->{heap}: Unexpected number of values (" . @list .
+                  " value in, " .
+                  @$out . " values out)");
+    }
+    for my $top (reverse @$out) {
+        @list || croak "Got value '$top' that should not exist";
+        my $key = $fake->{heap}->key($top);
+        my $i = 0;
+        my $pos;
+        for (@list) {
+            croak "'$_->{key}', not '$key' should have been the next key" if
+                $less->($key, $_->{key});
+            $pos = $i if $_->{value} eq $top;
+            $i++;
+        }
+        defined $pos ||
+            croak "Extracted value '$top' should not have been in the list";
+        splice(@list, $pos, 1);
     }
 }
 
@@ -667,7 +754,7 @@ sub _key_absorb {
 
 sub clear {
     my $fake = shift;
-    @{$fake->{data}} = ();    
+    @{$fake->{data}} = ();
     return $fake->{heap}->clear(@_);
 }
 

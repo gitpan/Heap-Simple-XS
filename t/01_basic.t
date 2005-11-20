@@ -9,12 +9,19 @@ BEGIN { $^W = 1 };
 use Test::More "no_plan";
 use lib "t";
 
+my $wanted_implementor;
 BEGIN {
-    @Heap::Simple::implementors = qw(Heap::Simple::XS) unless
+    $wanted_implementor = "XS";
+    @Heap::Simple::implementors = ("Heap::Simple::$wanted_implementor") unless
         @Heap::Simple::implementors;
     use_ok("Heap::Simple");
 };
-is(Heap::Simple->implementation, "Heap::Simple::XS");
+my $class = Heap::Simple->implementation;
+if ($class ne "Heap::Simple::$wanted_implementor") {
+    diag("Was supposed to test Heap::Simple::$wanted_implementor but loaded $class");
+    fail("Wrong heap library got loaded");
+    exit 1;
+}
 
 # Same very basic checks
 my $heap = Heap::Simple->new;
