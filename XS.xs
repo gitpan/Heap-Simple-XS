@@ -92,6 +92,11 @@ typedef struct fast_merge {
     NV key;
 } fast_merge;
 
+/* Workaround for older perls without packWARN */
+#ifndef packWARN
+# define packWARN(a) (a)
+#endif
+
 /* Duplicate from perl source (since it's not exported unfortunately) */
 static bool my_isa_lookup(pTHX_ HV *stash, const char *name, HV* name_stash,
                           int len, int level) {
@@ -273,7 +278,7 @@ static const char *order_name(heap h) {
       case GT:   return "gt";
       case CODE_ORDER: return "CODE";
       case 0: croak("Order type is unspecified");
-      default: croak("Assertion: Impossible order type %d", h->elements);
+      default: croak("Assertion: Impossible order type %d", h->order);
     }
     /* NOTREACHED */
     return NULL;
@@ -1152,7 +1157,7 @@ new(char *class, ...)
 
     for (i=1; i<items; i+=2) option(aTHX_ h, ST(i), ST(i+1));
 
-    if (!h->order) h->order    = LESS;
+    if (!h->order) h->order = LESS;
     if (!h->infinity) switch(h->order) {
       case LESS: h->infinity = newSVnv( INFINITY); break;
       case MORE: h->infinity = newSVnv(-INFINITY); break;
@@ -2188,20 +2193,17 @@ void
 user_data(heap h, SV *new_user_data=0)
   PPCODE:
     if (GIMME_V != G_VOID)
-        XPUSHs(h->user_data ?
-               sv_2mortal(SvREFCNT_inc(h->user_data)) : &PL_sv_undef);
+        PUSHs(h->user_data ? h->user_data : &PL_sv_undef);
     if (new_user_data) {
         if (h->user_data) sv_2mortal(h->user_data);
         h->user_data = newSVsv(new_user_data);
     }
 
-SV *
+void
 order(heap h)
-  CODE:
-    if (h->order == CODE_ORDER) RETVAL = SvREFCNT_inc(h->order_sv);
-    else                        RETVAL = newSVpv(order_name(h), 0);
-  OUTPUT:
-    RETVAL
+  PPCODE:
+    PUSHs(h->order == CODE_ORDER ?
+          h->order_sv : sv_2mortal(newSVpv(order_name(h), 0)));
 
 void
 elements(heap h)

@@ -9,10 +9,15 @@ Plan:
 	- Higher splitfactor (better for the cache). Maybe go for 4
           (highest factor that doesn't increase the amount of compares)
 
-0.08
+0.09  2005-11-30
+	- order_name called with unknown order reported wrong id.
+	  (bug, but one that should be impossible to ever trigger)
+	- added a #define packWARN for older perls that don't have it yet.
+
+0.08  2005-11-20
 	- Remove pointless sv_reftype test from object access.
 	- Add extract_all
-	- absorb and key_absorb now take any number of heaps as argument 
+	- absorb and key_absorb now take any number of heaps as argument
           instead of absorbing exactly one.
         - Add mass insert/key_insert/_key_insert. Use them in absorb.
 	- Added merge_arrays
@@ -26,7 +31,7 @@ Plan:
 	- Replaced :: by - in author email address (easier quoting for mailers)
 	- use size_t to index the data array. This should select the minimal
 	  sensible data width.
-	- Replaced sv_derived_from object access by much more sophisticated 
+	- Replaced sv_derived_from object access by much more sophisticated
           tests
         - Don't run benchmarks unless asked for during Makefile.PL
 
@@ -38,7 +43,7 @@ Plan:
 
 0.05  2004-11-07
 	- Removed a few unused variables.
-        - Add a few returns at unreachable places after croak to shut up 
+        - Add a few returns at unreachable places after croak to shut up
           compilers that think not all control paths return a value.
 	- Call pp_xxx through the ppaddr table so we don't need to link them.
 
@@ -48,12 +53,12 @@ Plan:
 	- Try to define infinity in a more portable way
         - Added a basic "load the module directly" test since the indirection
           through Heap::Simple hides load errors.
-        - Remove "use warnings" everywhere to give people a fighting chance to 
+        - Remove "use warnings" everywhere to give people a fighting chance to
           get the module working on perls before 5.6
 
 0.03  2004-11-05
 	- self-lock during DESTROY too
-	- Added a few forgotten aTHX_ arguments to key_insert (reported by 
+	- Added a few forgotten aTHX_ arguments to key_insert (reported by
           Mike Castle, thanks).
 	- dropped useless load of Carp in XS.pm
 
@@ -69,4 +74,3 @@ Plan:
 0.00  2004-10-12
 	- original version; created by h2xs 1.23 with options
 		-n Heap::Simple::XS
-
