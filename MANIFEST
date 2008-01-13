@@ -1,9 +1,12 @@
 Changes
 MANIFEST
+MANIFEST.SKIP
 Makefile.PL
 README
-XS.pm
 XS.xs
+lib/Heap/Simple/XS.pm
+lib/Heap/Simple/XS/Package.pm
+md5-versions
 ppport.h
 t/00_load.t
 t/01_basic.t

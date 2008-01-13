@@ -1,7 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
 # `make test'. After `make install' it should work as `perl t/04_overload.t'
-
 # use warnings;	# Remove this for production. Assumes perl 5.6
 use strict;
 

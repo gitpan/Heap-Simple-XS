@@ -1,7 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
 # `make test'. After `make install' it should work as `perl t/02_stress.t'
-
 # use warnings;	# Remove this for production. Assumes perl 5.6
 use strict;
 
@@ -43,9 +42,9 @@ my $unicode = "utf8"->can("is_utf8");
 
 my $evil_string = " _ABC()";
 if ($unicode) {
-    $evil_string .= chr for 0..512;
+    $evil_string .= chr for 1..38,40..512;	# Avoid 0 and '
 } else {
-    $evil_string .= chr for 0..255;
+    $evil_string .= chr for 1..38,40..255;	# Avoid 0 and '
 }
 
 {

@@ -3,6 +3,10 @@
 #include "perl.h"
 #include "XSUB.h"
 
+#define NEED_newRV_noinc
+#define NEED_sv_2pv_flags
+#define NEED_vnewSVpvf
+#define NEED_warner
 #include "ppport.h"
 
 #define MAGIC	1	/* Support magic */
@@ -376,6 +380,7 @@ static SV *fetch_key(pTHX_ heap h, SV *value) {
 static int less(pTHX_ heap h, SV *l, SV *r) {
     SV *result;
     I32 start, count;
+    struct op dmy_op, *old_op;
     dSP;
 
     start = (SP) - PL_stack_base;
@@ -386,19 +391,27 @@ static int less(pTHX_ heap h, SV *l, SV *r) {
     switch(h->order) {
       case LESS:
         /* pp_lt(); */
-        PL_ppaddr[OP_LT](aTHX);
+        PL_ppaddr[OP_LT](aTHXR);
         break;
       case MORE:
         /* pp_gt(); */
-        PL_ppaddr[OP_GT](aTHX);
+        PL_ppaddr[OP_GT](aTHXR);
         break;
       case LT:
         /* pp_slt(); */
-        PL_ppaddr[OP_SLT](aTHX);
+        old_op = PL_op;
+        PL_op = &dmy_op;
+        PL_op->op_type = OP_SLT;
+        PL_ppaddr[OP_SLT](aTHXR);
+        PL_op = old_op;
         break;
       case GT:
         /* pp_sgt(); */
-        PL_ppaddr[OP_SGT](aTHX);
+        old_op = PL_op;
+        PL_op = &dmy_op;
+        PL_op->op_type = OP_SGT;
+        PL_ppaddr[OP_SGT](aTHXR);
+        PL_op = old_op;
         break;
       case CODE_ORDER:
         count = call_sv(h->order_sv, G_SCALAR);
@@ -411,7 +424,7 @@ static int less(pTHX_ heap h, SV *l, SV *r) {
     result = POPs;
     if (start != (SP) - PL_stack_base) croak("Stack base changed");
     PUTBACK;
-    /* warn("comparing %"NVff" to %"NVff" -> %d", SvNV(l), SvNV(r), SvTRUE(result) ? 1 : 0); */
+    /* warn("comparing %"SVf" to %"SVf" -> %d", l, r, SvTRUE(result) ? 1 : 0); */
     if      (result == &PL_sv_yes) return 1;
     else if (result == &PL_sv_no)  return 0;
     /* This can also happen for pp_lt and co in case the value is overloaded */
@@ -1510,8 +1523,8 @@ extract_all(heap h)
     if (h->fast) {
         /* No PUTBACK/SPAGAIN needed since fast extract top
            won't change the stack */
-        while (h->used >= 2) XPUSHs(sv_2mortal(extract_top(aTHX_ h)));
-    } else while (h->used >= 2) {
+        while (h->used > 1) XPUSHs(sv_2mortal(extract_top(aTHX_ h)));
+    } else while (h->used > 1) {
         SV *top;
 
         PUTBACK;
@@ -1614,7 +1627,7 @@ clear(heap h)
             SvREFCNT_dec(value);
         }
     }
-    if ((h->used+4)*4 < h->allocated) extend(h, 0); /* shrink really */
+    if ((1+4)*4 < h->allocated) extend(h, 0); /* shrink really */
 
 SV *
 key(heap h, SV *value)
@@ -1668,7 +1681,6 @@ _absorb(SV * heap1, SV *heap2)
         else one_by_one = h2->can_die;
         if (!one_by_one) {
             SV *key;
-            size_t top, bottom;
 
             if (h2->locked) croak("recursive heap change");
             SAVEINT(h2->locked);
@@ -2090,9 +2102,9 @@ _key_absorb(SV * heap1, SV *heap2)
                 SP -= count;
             }
             while (h1->used > 1) {
+                h1->used--;
                 if (h1->has_values) SvREFCNT_dec(h1->values[h1->used]);
                 if (h1->wrapped && !h1->fast) SvREFCNT_dec(KEY(h1, h1->used));
-                h1->used-1;
             }
             if ((h1->used+4)*4 < h1->allocated) extend(h1, 0); /* shrink really */
         }
